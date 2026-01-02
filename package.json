@@ -1,5 +1,6 @@
 {
   "name": "mass-mechanic-bot",
+  "type": "module",
   "version": "1.0.0",
   "description": "AI Voice Agent for Mass Mechanic",
   "main": "server.js",
