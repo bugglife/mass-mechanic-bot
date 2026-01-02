@@ -131,7 +131,6 @@ function routeIntent(text, ctx) {
     if (len >= 10) {
       ctx.state = "closing"; 
       const clean = p.slice(0, 10);
-      // <--- FIX: Added spaces between EVERY digit so it reads them individually
       const formatted = `${clean[0]} ${clean[1]} ${clean[2]}... ${clean[3]} ${clean[4]} ${clean[5]}... ${clean[6]} ${clean[7]} ${clean[8]} ${clean[9]}`;
       return `Perfect, I have ${formatted}. I'll have a senior mechanic call you shortly to confirm the details. Thanks for calling Mass Mechanic!`;
     }
@@ -142,7 +141,9 @@ function routeIntent(text, ctx) {
        return `Sorry, I missed that last part. I have ${len} digits so far. What are the last few?`;
     }
 
-    return "I didn't quite catch that. Could you start with just the area code? For example, 6 1 7.";
+    // <--- FIX: "Polite Pivot" for text interruptions (e.g., "when i break")
+    // Instead of saying "I didn't catch that", assume they gave a detail and ask again.
+    return "Okay, noted. What is the best phone number to reach you at?";
   }
 
   // 2. Global Commands
