@@ -24,7 +24,6 @@ if (!OPENAI_API_KEY || !DG_KEY || !TWILIO_SID || !TWILIO_AUTH) {
   process.exit(1);
 }
 
-// Initialize Twilio Client
 const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH);
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -40,19 +39,17 @@ class ConversationContext {
       callerId: "",
       makeModel: null, 
       issue: null,     
-      message: "",      
+      message: "",
+      manualContact: null, // <--- NEW: Stores Name/Number they speak manually
       userType: "driver"
     };
   }
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 3. UTILITIES (SMS & Phone Extraction)
+// 3. UTILITIES
 // ───────────────────────────────────────────────────────────────────────────────
-
-// NEW: Function to send SMS (Fire & Forget)
 function sendSms(to, body) {
-    // We do NOT 'await' this. We let it run in the background.
     twilioClient.messages.create({
         body: body,
         from: TWILIO_PHONE,
@@ -109,22 +106,32 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // ─── MANAGER FLOW ───
-  if (ctx.state === "confirm_manager") {
-      if (q.includes("yes") || q.includes("yeah") || q.includes("sure") || q.includes("please")) {
-          ctx.state = "take_message";
-          return "Great. Leave your message with me and I'll text a team member about your concern. What would you like me to tell them?";
-      }
-      ctx.state = "greeting";
-      return "Okay, no problem. I can help you find a mechanic or answer general questions. How can I help?";
-  }
+  // ─── MANAGER FLOW (UPDATED) ───
   
+  // Step 1: Trigger
   if (q.includes("manager") || q.includes("operator") || q.includes("supervisor") || q.includes("owner") || q.includes("speak with") || q.includes("talk to a person") || q.includes("real person")) {
       ctx.state = "confirm_manager";
       return "Would you like me to connect you with a member of our team?";
   }
 
-  // ─── BOOKING & PHONE LOGIC ───
+  // Step 2: Confirm -> Ask for Contact Info (NEW)
+  if (ctx.state === "confirm_manager") {
+      if (q.includes("yes") || q.includes("yeah") || q.includes("sure") || q.includes("please")) {
+          ctx.state = "collect_contact_info"; // <--- Move to new state
+          return "Okay. First, what is your name and the best phone number to reach you at?";
+      }
+      ctx.state = "greeting";
+      return "Okay, no problem. I can help you find a mechanic or answer general questions. How can I help?";
+  }
+
+  // Step 3: Capture Name/Number -> Start Recording (NEW)
+  if (ctx.state === "collect_contact_info") {
+      ctx.data.manualContact = text; // Save what they said (e.g. "Tom 508-555...")
+      ctx.state = "take_message";
+      return "Thanks. Go ahead with your message, and I'll text it to them immediately.";
+  }
+
+  // ─── BOOKING FLOW ───
   if (ctx.state === "confirm_phone") {
       if (q.includes("no") || q.includes("wrong") || q.includes("wait")) {
           ctx.data.phone = "";
@@ -156,7 +163,6 @@ function routeIntent(text, ctx) {
     return "Okay, noted. What is the best phone number to reach you at?";
   }
 
-  // ─── FAQ ───
   if (q.includes("i am a mechanic") || q.includes("looking for work") || q.includes("partner")) {
       ctx.data.userType = "mechanic";
       return "That's great! We are looking for partners. Please visit mass mechanic dot com and click 'Partner With Us'.";
@@ -168,7 +174,6 @@ function routeIntent(text, ctx) {
     return "Our service is 100% free for drivers. You only pay the shop if you choose to hire them.";
   }
 
-  // ─── BOOKING FLOW ───
   if (ctx.state === "greeting") {
     if (q.includes("book") || q.includes("schedule") || q.includes("repair") || q.includes("quote") || q.includes("fix")) {
       ctx.state = "collect_zip";
@@ -293,8 +298,6 @@ wss.on("connection", (ws) => {
       // ─── VOICEMAIL LOGIC ───
       if (ws._ctx.state === "take_message") {
           ws._ctx.data.message += " " + transcript;
-          
-          // <--- NEW: Show the message building in the logs
           console.log(`📝 Buffer: "${ws._ctx.data.message.trim()}"`);
 
           if (ws._messageTimer) clearTimeout(ws._messageTimer);
@@ -303,16 +306,14 @@ wss.on("connection", (ws) => {
               console.log("Message recording finished.");
               ws._ctx.state = "closing"; 
               
-              // <--- FIRE AND FORGET SMS (No await)
-              const contactInfo = ws._ctx.data.phone || ws._ctx.data.callerId || "Unknown Caller";
-              const note = `📞 Voicemail from ${contactInfo}:\n\n"${ws._ctx.data.message.trim()}"`;
+              // <--- SMS CONSTRUCTION (Using the manually given contact info)
+              const who = ws._ctx.data.manualContact || ws._ctx.data.callerId || "Unknown";
+              const note = `📞 Voicemail from:\n${who}\n\nMessage:\n"${ws._ctx.data.message.trim()}"`;
+              
               if (MY_PHONE) sendSms(MY_PHONE, note);
 
-              // Send confirmation to caller
-              if (ws._ctx.data.callerId) {
-                  sendSms(ws._ctx.data.callerId, "Thanks for calling Mass Mechanic. We received your message and will get back to you shortly!");
-              }
-
+              // Don't send confirmation to the user here because 'manualContact' might contain words like "It's Tom" which isn't a valid phone number.
+              
               const reply = "Thanks. I've sent that text to them immediately. They should get back to you soon. Thanks for calling Mass Mechanic! Bye now.";
               speakResponse(ws, reply);
           }, 6000); 
