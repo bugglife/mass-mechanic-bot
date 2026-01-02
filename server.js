@@ -51,15 +51,14 @@ function extractPhoneNumber(text) {
   let digits = '';
   const words = q.split(/\s+/);
   
-  // Standard regex match (e.g. "617-555-1234")
   const match = q.match(/(\d{3})[\s.-]?(\d{3})[\s.-]?(\d{4})/);
   if (match) return match[0].replace(/\D/g, '');
 
   let i = 0;
   while (i < words.length) {
     const word = words[i];
-    
-    // <--- FIX: Handle "Two Hundred" -> 200
+
+    // Handle "Two Hundred" -> 200
     if (word === 'hundred') {
         digits += "00";
         i++; continue;
@@ -74,7 +73,6 @@ function extractPhoneNumber(text) {
       }
     }
     
-    // Standard words
     if (NUMBER_WORDS_MAP[word] && NUMBER_WORDS_MAP[word].length === 1) {
       digits += NUMBER_WORDS_MAP[word];
     } else if (/^\d+$/.test(word)) {
@@ -101,35 +99,29 @@ function routeIntent(text, ctx) {
     const len = ctx.data.phone.length;
     const p = ctx.data.phone;
 
-    // --- SCENARIO A: Moving forward ---
     if (len === 3) {
-       // Added "Human" padding
        return `Got it, area code ${p.split('').join(' ')}. What are the next three digits?`;
     }
     if (len === 6) {
        const last3 = p.slice(3, 6).split('').join(' ');
-       return `Okay, ${last3}. I'm ready for the last four whenever you are.`;
+       return `Okay, ${last3}. And the last four?`;
     }
     if (len === 9) {
-       return `Almost got it. Just one digit left. What is the last number?`;
+       return `Almost there. Just one digit left. What is the last number?`;
     }
     if (len >= 10) {
       ctx.state = "closing"; 
-      // Trim to 10
       const clean = p.slice(0, 10);
       const formatted = `${clean[0]}${clean[1]}${clean[2]}... ${clean[3]}${clean[4]}${clean[5]}... ${clean[6]}${clean[7]}${clean[8]}${clean[9]}`;
       return `Perfect, I have ${formatted}. I'll have a senior mechanic call you shortly to confirm the details. Thanks for calling Mass Mechanic!`;
     }
     
-    // --- SCENARIO B: We have partial data, but user said something we didn't catch ---
-    // <--- FIX: This block ensures we NEVER reset to "Start over" if we have digits
     if (len > 0) {
        if (len < 3) return `I have ${p.split('').join(' ')} so far. What is the rest of the area code?`;
        if (len < 6) return `I have the area code. What are the next three digits?`;
        return `Sorry, I missed that last part. I have ${len} digits so far. What are the last few?`;
     }
 
-    // --- SCENARIO C: We truly have nothing ---
     return "I didn't quite catch that. Could you start with just the area code? For example, 6 1 7.";
   }
 
@@ -150,7 +142,6 @@ function routeIntent(text, ctx) {
     }
     if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair") || q.includes("help") || q.includes("car")) {
       ctx.state = "collect_details";
-      // Warmer phrasing
       return "I'd be happy to help you with that. To get started, what is the Year, Make, and Model of your car?";
     }
   }
@@ -166,7 +157,14 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    // More empathy
+    
+    // <--- FIX: Smart check for short answers to avoid "Brain Farts"
+    // If answer is short (like "V70" or "the engine"), skip the heavy empathy
+    if (text.split(" ").length < 3) {
+        return "Understood. I'd like to have a mechanic look at that. What's the best phone number to reach you at?";
+    }
+    
+    // If answer is longer, show empathy
     return "Oof, I hear you. That sounds frustrating. I want to get a pro to take a look at that ASAP. What's the best phone number to reach you at? You can start with just the area code.";
   }
 
@@ -224,6 +222,8 @@ wss.on("connection", (ws) => {
   console.log("🔗 Call Connected");
   ws._ctx = new ConversationContext();
   ws._speaking = false;
+  // <--- FIX: Add a cancellation token to stop audio loops instantly
+  ws._currentMsgId = 0; 
 
   const dg = new WebSocket(`wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&endpointing=true`, {
     headers: { Authorization: `Token ${DG_KEY}` }
@@ -237,37 +237,56 @@ wss.on("connection", (ws) => {
       
       console.log(`User: ${transcript}`);
       
+      // <--- BARGE-IN KILL SWITCH
+      // 1. Tell Twilio to clear the buffer
       if (ws._speaking) {
          console.log("!! Barge-in: Clearing audio !!");
          ws.send(JSON.stringify({ event: "clear", streamSid: ws._streamSid }));
       }
+      // 2. Increment Msg ID so the previous loop stops sending frames
+      ws._currentMsgId++; 
 
       const reply = routeIntent(transcript, ws._ctx);
       console.log(`Bot: ${reply}`);
 
       ws._speaking = true;
+      const myMsgId = ws._currentMsgId; // Track this specific response
+
       try {
         const audio = await ttsToMulaw(reply);
+        
+        // If barge-in happened WHILE we were generating audio, abort now
+        if (ws._currentMsgId !== myMsgId) return;
+
         const FRAME_SIZE = 160; 
         for (let i = 0; i < audio.length; i += FRAME_SIZE) {
-          if (ws.readyState !== ws.OPEN) break;
+          // <--- CRITICAL CHECK: If a new message started, STOP this loop
+          if (ws._currentMsgId !== myMsgId || ws.readyState !== ws.OPEN) break;
+          
           const frame = audio.slice(i, i + FRAME_SIZE).toString("base64");
           ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: frame } }));
           await new Promise(r => setTimeout(r, 20));
         }
 
-        if (ws._ctx.state === "closing") {
+        // Only hang up if we finished speaking naturally (didn't get interrupted)
+        if (ws._ctx.state === "closing" && ws._currentMsgId === myMsgId) {
            console.log("Conversation complete. Hanging up in 3s...");
            setTimeout(() => {
-             console.log("Closing socket.");
-             ws.close(); 
+             // Check one last time to make sure they didn't interrupt the goodbye
+             if (ws._currentMsgId === myMsgId) {
+                 console.log("Closing socket.");
+                 ws.close(); 
+             }
            }, 3000);
         }
 
       } catch (e) {
         console.error(e);
       } finally {
-        ws._speaking = false;
+        // Only clear flag if WE are the ones who finished speaking
+        if (ws._currentMsgId === myMsgId) {
+            ws._speaking = false;
+        }
       }
     }
   });
@@ -282,14 +301,17 @@ wss.on("connection", (ws) => {
       
       (async () => {
          ws._speaking = true;
+         ws._currentMsgId++;
+         const myMsgId = ws._currentMsgId;
+         
          const audio = await ttsToMulaw(greeting);
          const FRAME_SIZE = 160;
          for (let i = 0; i < audio.length; i += FRAME_SIZE) {
-           if (ws.readyState !== ws.OPEN) break;
+           if (ws._currentMsgId !== myMsgId || ws.readyState !== ws.OPEN) break;
            ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: audio.slice(i, i + FRAME_SIZE).toString("base64") } }));
            await new Promise(r => setTimeout(r, 20));
          }
-         ws._speaking = false;
+         if (ws._currentMsgId === myMsgId) ws._speaking = false;
       })();
     }
     if (data.event === "media" && dg.readyState === dg.OPEN) {
