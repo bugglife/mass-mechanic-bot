@@ -31,7 +31,7 @@ class ConversationContext {
       phone: "",       
       makeModel: null, 
       issue: null,     
-      message: null,    
+      message: "",      // <--- Buffer for the long message
       userType: "driver"
     };
   }
@@ -88,9 +88,7 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // ─── SPECIAL: Manager/Operator Flow ───
-  
-  // Step 2: Confirm they want to connect
+  // ─── SPECIAL: Manager Flow (Confirming) ───
   if (ctx.state === "confirm_manager") {
       if (q.includes("yes") || q.includes("yeah") || q.includes("sure") || q.includes("please") || q.includes("do that")) {
           ctx.state = "take_message";
@@ -99,15 +97,8 @@ function routeIntent(text, ctx) {
       ctx.state = "greeting";
       return "Okay, no problem. I can help you find a mechanic or answer general questions. How can I help?";
   }
-
-  // Step 3: Record the message
-  if (ctx.state === "take_message") {
-      ctx.data.message = text;
-      ctx.state = "closing"; 
-      return "Thanks. I've sent that text to them immediately. They should get back to you soon. Thanks for calling Mass Mechanic! Bye now.";
-  }
   
-  // Step 1: Trigger (Global)
+  // Trigger (Global)
   if (q.includes("manager") || q.includes("operator") || q.includes("supervisor") || q.includes("owner") || q.includes("speak with") || q.includes("talk to a person") || q.includes("real person")) {
       ctx.state = "confirm_manager";
       return "Would you like me to connect you with a member of our team?";
@@ -228,7 +219,7 @@ function routeIntent(text, ctx) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 5. AUDIO PIPELINE
+// 5. AUDIO PIPELINE UTILS
 // ───────────────────────────────────────────────────────────────────────────────
 async function ttsToMulaw(text) { 
   const url = "https://api.openai.com/v1/audio/speech";
@@ -263,6 +254,38 @@ async function ttsToMulaw(text) {
   });
 }
 
+// Helper to stream audio to WebSocket
+async function speakResponse(ws, text) {
+    ws._speaking = true;
+    const myMsgId = ++ws._currentMsgId;
+    console.log(`Bot: ${text}`);
+
+    try {
+        const audio = await ttsToMulaw(text);
+        if (ws._currentMsgId !== myMsgId) return; // Barge-in happened
+
+        const FRAME_SIZE = 160; 
+        for (let i = 0; i < audio.length; i += FRAME_SIZE) {
+            if (ws._currentMsgId !== myMsgId || ws.readyState !== ws.OPEN) break;
+            const frame = audio.slice(i, i + FRAME_SIZE).toString("base64");
+            ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: frame } }));
+            await new Promise(r => setTimeout(r, 20));
+        }
+
+        // Handle Hangup if this was the last message
+        if (ws._ctx.state === "closing" && ws._currentMsgId === myMsgId) {
+           setTimeout(() => { if (ws._currentMsgId === myMsgId) ws.close(); }, 3000);
+        }
+
+    } catch (e) {
+        console.error(e);
+    } finally {
+        if (ws._currentMsgId === myMsgId) {
+            ws._speaking = false;
+        }
+    }
+}
+
 // ───────────────────────────────────────────────────────────────────────────────
 // 6. SERVER SETUP
 // ───────────────────────────────────────────────────────────────────────────────
@@ -273,6 +296,7 @@ wss.on("connection", (ws) => {
   ws._ctx = new ConversationContext();
   ws._speaking = false;
   ws._currentMsgId = 0; 
+  ws._messageTimer = null; // Timer for voicemail buffer
 
   const dg = new WebSocket(`wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&endpointing=true`, {
     headers: { Authorization: `Token ${DG_KEY}` }
@@ -286,51 +310,41 @@ wss.on("connection", (ws) => {
       
       console.log(`User: ${transcript}`);
 
-      // <--- FIX: THE ZOMBIE KILL SWITCH
-      // If we are already closing, ignore everything.
+      // 1. ZOMBIE KILL SWITCH (If closing, ignore everything)
       if (ws._ctx.state === "closing") {
           console.log("Ignored input (Closing state active)");
           return;
       }
       
+      // 2. VOICEMAIL BUFFER LOGIC (The "Patient Listener")
+      if (ws._ctx.state === "take_message") {
+          // Add to buffer
+          ws._ctx.data.message += " " + transcript;
+          
+          // Reset the silence timer
+          if (ws._messageTimer) clearTimeout(ws._messageTimer);
+          
+          // Wait 2.5 seconds for silence before sending
+          ws._messageTimer = setTimeout(() => {
+              console.log("Message recording finished.");
+              ws._ctx.state = "closing"; // Lock it
+              const reply = "Thanks. I've sent that text to them immediately. They should get back to you soon. Thanks for calling Mass Mechanic! Bye now.";
+              speakResponse(ws, reply);
+          }, 2500);
+          
+          return; // STOP here. Don't run routeIntent.
+      }
+      
+      // 3. NORMAL CONVERSATION
       if (ws._speaking) {
          console.log("!! Barge-in: Clearing audio !!");
          ws.send(JSON.stringify({ event: "clear", streamSid: ws._streamSid }));
       }
-      ws._currentMsgId++; 
-
+      
       const reply = routeIntent(transcript, ws._ctx);
       if (!reply) return; 
 
-      console.log(`Bot: ${reply}`);
-
-      ws._speaking = true;
-      const myMsgId = ws._currentMsgId; 
-
-      try {
-        const audio = await ttsToMulaw(reply);
-        
-        if (ws._currentMsgId !== myMsgId) return;
-
-        const FRAME_SIZE = 160; 
-        for (let i = 0; i < audio.length; i += FRAME_SIZE) {
-          if (ws._currentMsgId !== myMsgId || ws.readyState !== ws.OPEN) break;
-          const frame = audio.slice(i, i + FRAME_SIZE).toString("base64");
-          ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: frame } }));
-          await new Promise(r => setTimeout(r, 20));
-        }
-
-        if (ws._ctx.state === "closing" && ws._currentMsgId === myMsgId) {
-           setTimeout(() => { if (ws._currentMsgId === myMsgId) ws.close(); }, 3000);
-        }
-
-      } catch (e) {
-        console.error(e);
-      } finally {
-        if (ws._currentMsgId === myMsgId) {
-            ws._speaking = false;
-        }
-      }
+      speakResponse(ws, reply);
     }
   });
 
@@ -340,19 +354,7 @@ wss.on("connection", (ws) => {
       ws._streamSid = data.start.streamSid;
       console.log("Call Started");
       const greeting = "Hi! Thanks for calling Mass Mechanic. I can connect you with a trusted local mechanic for a free quote. Are you looking to schedule a repair, or do you have general questions?";
-      (async () => {
-         ws._speaking = true;
-         ws._currentMsgId++;
-         const myMsgId = ws._currentMsgId;
-         const audio = await ttsToMulaw(greeting);
-         const FRAME_SIZE = 160;
-         for (let i = 0; i < audio.length; i += FRAME_SIZE) {
-           if (ws._currentMsgId !== myMsgId || ws.readyState !== ws.OPEN) break;
-           ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: audio.slice(i, i + FRAME_SIZE).toString("base64") } }));
-           await new Promise(r => setTimeout(r, 20));
-         }
-         if (ws._currentMsgId === myMsgId) ws._speaking = false;
-      })();
+      speakResponse(ws, greeting);
     }
     if (data.event === "media" && dg.readyState === dg.OPEN) {
       const payload = Buffer.from(data.media.payload, "base64");
