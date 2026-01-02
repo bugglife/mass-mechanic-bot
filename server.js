@@ -112,7 +112,7 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
     
-    // V70/Model protection: Only accept short numbers if we already have digits
+    // V70/Model protection
     if (extracted) {
         if (ctx.data.phone.length > 0 || extracted.length >= 3) {
             ctx.data.phone += extracted;
@@ -145,7 +145,6 @@ function routeIntent(text, ctx) {
        return `Sorry, I missed that last part. I have ${len} digits so far. What are the last few?`;
     }
 
-    // Polite Pivot
     return "Okay, noted. What is the best phone number to reach you at?";
   }
 
@@ -172,41 +171,38 @@ function routeIntent(text, ctx) {
 
   // 4. Vehicle Details
   if (ctx.state === "collect_details") {
-    // Detect if they only said a Year
+    // Year check
     const isJustYear = text.match(/^(19|20)\d{2}$/) || text.match(/^(nineteen|twenty)/i);
-    
     if (isJustYear && text.split(" ").length < 4) {
          ctx.data.makeModel = text; 
          return `Okay, ${text}. And what is the Make and Model?`;
     }
 
-    ctx.data.makeModel += " " + text; 
+    // Append to existing year if present
+    if (ctx.data.makeModel) {
+        ctx.data.makeModel += " " + text;
+    } else {
+        ctx.data.makeModel = text;
+    }
+
     ctx.state = "collect_issue";
     return "Okay, got it. And can you tell me a little bit about what's going on with it?";
   }
 
-  // 5. Issue Details -> Start Phone Collection
+  // 5. Issue Details
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    
-    // <--- FIX: Smart "Oof" Guard
-    // If the input is short (likely a car model arriving late like "V70"), skip the drama.
-    // Also fixed the ASAP pronunciation.
     if (text.split(" ").length < 4) {
         return "Understood. I'd like to have a mechanic look at that. What's the best phone number to reach you at?";
     }
-    
-    // If answer is longer, show empathy
     return "Oof, I hear you. That sounds frustrating. I want to get a pro to take a look at that as soon as possible. What's the best phone number to reach you at? You can start with just the area code.";
   }
 
-  // Fallback
   if (ctx.state === "greeting") {
       ctx.state = "collect_details";
       return "I can help you schedule a repair. What kind of car do you have?";
   }
-
   return "Could you repeat that? I can help you schedule a repair.";
 }
 
@@ -295,10 +291,8 @@ wss.on("connection", (ws) => {
         }
 
         if (ws._ctx.state === "closing" && ws._currentMsgId === myMsgId) {
-           console.log("Conversation complete. Hanging up in 3s...");
            setTimeout(() => {
              if (ws._currentMsgId === myMsgId) {
-                 console.log("Closing socket.");
                  ws.close(); 
              }
            }, 3000);
@@ -319,14 +313,11 @@ wss.on("connection", (ws) => {
     if (data.event === "start") {
       ws._streamSid = data.start.streamSid;
       console.log("Call Started");
-      
       const greeting = "Hi! Thanks for calling Mass Mechanic. I can help you schedule a repair or answer questions. How can I help?";
-      
       (async () => {
          ws._speaking = true;
          ws._currentMsgId++;
          const myMsgId = ws._currentMsgId;
-         
          const audio = await ttsToMulaw(greeting);
          const FRAME_SIZE = 160;
          for (let i = 0; i < audio.length; i += FRAME_SIZE) {
@@ -342,6 +333,13 @@ wss.on("connection", (ws) => {
       dg.send(payload);
     }
     if (data.event === "stop") dg.close();
+  });
+
+  // <--- NEW: Print the "Receipt" when the call ends
+  ws.on("close", () => {
+     console.log("🔴 Call Ended");
+     console.log("📝 FINAL CAPTURE DATA:");
+     console.log(JSON.stringify(ws._ctx.data, null, 2));
   });
 });
 
