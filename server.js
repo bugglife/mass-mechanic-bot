@@ -46,7 +46,6 @@ const NUMBER_WORDS_MAP = {
   'double': 'repeat_next', 'triple': 'triple_next'
 };
 
-// <--- FIX: Add mapping for "Tens" to handle "thirty sixty-four"
 const TENS_MAP = {
   'twenty': '2', 'thirty': '3', 'forty': '4', 'fifty': '5',
   'sixty': '6', 'seventy': '7', 'eighty': '8', 'ninety': '9'
@@ -71,16 +70,13 @@ function extractPhoneNumber(text) {
         i++; continue;
     }
 
-    // 2. Handle "Thirty", "Sixty-four", etc. <--- NEW LOGIC
+    // 2. Handle "Thirty", "Sixty-four"
     if (TENS_MAP[word]) {
        const firstDigit = TENS_MAP[word];
-       // Check next word: is it a single digit? (e.g. "thirty" ... "four")
        if (i + 1 < words.length && NUMBER_WORDS_MAP[words[i+1]] && NUMBER_WORDS_MAP[words[i+1]].length === 1) {
-           // Case: "thirty four" -> 34
            digits += firstDigit + NUMBER_WORDS_MAP[words[i+1]];
            i += 2; continue;
        } else {
-           // Case: "thirty" (pause) or "thirty sixty" -> 30
            digits += firstDigit + '0';
            i++; continue;
        }
@@ -135,7 +131,8 @@ function routeIntent(text, ctx) {
     if (len >= 10) {
       ctx.state = "closing"; 
       const clean = p.slice(0, 10);
-      const formatted = `${clean[0]}${clean[1]}${clean[2]}... ${clean[3]}${clean[4]}${clean[5]}... ${clean[6]}${clean[7]}${clean[8]}${clean[9]}`;
+      // <--- FIX: Added spaces between EVERY digit so it reads them individually
+      const formatted = `${clean[0]} ${clean[1]} ${clean[2]}... ${clean[3]} ${clean[4]} ${clean[5]}... ${clean[6]} ${clean[7]} ${clean[8]} ${clean[9]}`;
       return `Perfect, I have ${formatted}. I'll have a senior mechanic call you shortly to confirm the details. Thanks for calling Mass Mechanic!`;
     }
     
