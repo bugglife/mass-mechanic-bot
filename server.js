@@ -12,6 +12,9 @@ import { createClient } from "@supabase/supabase-js";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// Middleware to parse incoming Twilio SMS data
+app.use(express.urlencoded({ extended: true }));
+
 // API Keys
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY; 
 const DG_KEY = process.env.DEEPGRAM_API_KEY;
@@ -22,7 +25,7 @@ const MY_PHONE = process.env.MY_PHONE_NUMBER;
 
 // Supabase Keys
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const SUPABASE_KEY = process.env.SUPABASE_KEY; // Use the SERVICE_ROLE (Secret) key!
 
 if (!OPENAI_API_KEY || !DG_KEY || !TWILIO_SID || !TWILIO_AUTH || !SUPABASE_URL || !SUPABASE_KEY) {
   console.error("❌ Missing API Keys. Check your .env file.");
@@ -34,7 +37,60 @@ const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH);
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 2. CONVERSATION BRAIN
+// 2. NEW: SMS AUTO-REPLY BOT
+// ───────────────────────────────────────────────────────────────────────────────
+app.post('/sms', async (req, res) => {
+    const incomingMsg = req.body.Body;
+    const fromNumber = req.body.From;
+    
+    console.log(`📩 SMS Received from ${fromNumber}: ${incomingMsg}`);
+
+    // 1. Define the Bot's Personality for Texting
+    const systemPrompt = `
+    You are the SMS assistant for Mass Mechanic.
+    - We are a referral service, NOT a repair shop.
+    - We connect drivers with trusted local mechanics in Massachusetts for free quotes.
+    - Our service is 100% free for drivers.
+    - If they want to book, ask for their Zip Code and Car Make/Model.
+    - Keep answers short (under 160 chars if possible) and friendly.
+    `;
+
+    try {
+        // 2. Ask OpenAI for a reply
+        const gptResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                model: "gpt-4o", // Or gpt-3.5-turbo
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: incomingMsg }
+                ],
+                max_tokens: 100
+            })
+        });
+
+        const data = await gptResponse.json();
+        const replyText = data.choices[0].message.content;
+
+        // 3. Send reply back to Twilio (TwiML)
+        const twiml = new twilio.twiml.MessagingResponse();
+        twiml.message(replyText);
+
+        res.type('text/xml').send(twiml.toString());
+        console.log(`📤 SMS Reply Sent: ${replyText}`);
+
+    } catch (error) {
+        console.error("❌ SMS Error:", error);
+        res.status(500).send("Error");
+    }
+});
+
+// ───────────────────────────────────────────────────────────────────────────────
+// 3. VOICE CONVERSATION BRAIN
 // ───────────────────────────────────────────────────────────────────────────────
 class ConversationContext {
   constructor() {
@@ -54,7 +110,7 @@ class ConversationContext {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 3. UTILITIES
+// 4. UTILITIES (Database & SMS)
 // ───────────────────────────────────────────────────────────────────────────────
 
 function sendSms(to, body) {
@@ -66,13 +122,11 @@ function sendSms(to, body) {
       .catch(err => console.error(`❌ SMS Failed: ${err.message}`));
 }
 
-// <--- UPDATED: Pointing to 'phone_leads' table
 async function saveToSupabase(data) {
     try {
         const bestPhone = data.phone || data.manualContact || data.callerId || "Unknown";
-
         const { error } = await supabase
-            .from('phone_leads') // <--- CHANGED TABLE NAME
+            .from('phone_leads') 
             .insert({
                 phone: bestPhone,
                 zip: data.zip,
@@ -81,7 +135,6 @@ async function saveToSupabase(data) {
                 message: data.message,
                 user_type: data.userType
             });
-
         if (error) throw error;
         console.log("🚀 Data saved to Supabase (phone_leads)!");
     } catch (err) {
@@ -101,18 +154,8 @@ function generateReport(data) {
     return report;
 }
 
-const NUMBER_WORDS_MAP = {
-  'zero': '0', 'oh': '0', 'o': '0', 'one': '1', 'won': '1',
-  'two': '2', 'to': '2', 'too': '2', 'three': '3', 'tree': '3',
-  'four': '4', 'for': '4', 'five': '5', 'six': '6', 'seven': '7',
-  'eight': '8', 'ate': '8', 'nine': '9',
-  'double': 'repeat_next', 'triple': 'triple_next'
-};
-
-const TENS_MAP = {
-  'twenty': '2', 'thirty': '3', 'forty': '4', 'fifty': '5',
-  'sixty': '6', 'seventy': '7', 'eighty': '8', 'ninety': '9'
-};
+const NUMBER_WORDS_MAP = { 'zero': '0', 'oh': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9' };
+const TENS_MAP = { 'twenty': '2', 'thirty': '3', 'forty': '4', 'fifty': '5', 'sixty': '6', 'seventy': '7', 'eighty': '8', 'ninety': '9' };
 
 function extractPhoneNumber(text) {
   const q = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").trim();
@@ -132,10 +175,6 @@ function extractPhoneNumber(text) {
            digits += firstDigit + NUMBER_WORDS_MAP[words[i+1]]; i += 2; continue;
        } else { digits += firstDigit + '0'; i++; continue; }
     }
-    if (word === 'double' && i + 1 < words.length) {
-      const nextDigit = NUMBER_WORDS_MAP[words[i + 1]];
-      if (nextDigit && nextDigit.length === 1) { digits += nextDigit + nextDigit; i += 2; continue; }
-    }
     if (NUMBER_WORDS_MAP[word] && NUMBER_WORDS_MAP[word].length === 1) { digits += NUMBER_WORDS_MAP[word]; } 
     else if (/^\d+$/.test(word)) { digits += word; }
     i++;
@@ -144,19 +183,19 @@ function extractPhoneNumber(text) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 4. INTELLIGENCE (Routing Logic)
+// 5. INTELLIGENCE (Voice Routing)
 // ───────────────────────────────────────────────────────────────────────────────
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
   // ─── MANAGER FLOW ───
-  if (q.includes("manager") || q.includes("operator") || q.includes("supervisor") || q.includes("owner") || q.includes("speak with") || q.includes("talk to a person") || q.includes("real person")) {
+  if (q.includes("manager") || q.includes("operator") || q.includes("supervisor") || q.includes("owner") || q.includes("speak with") || q.includes("talk to a person")) {
       ctx.state = "confirm_manager";
       return "Would you like me to connect you with a member of our team?";
   }
 
   if (ctx.state === "confirm_manager") {
-      if (q.includes("yes") || q.includes("yeah") || q.includes("sure") || q.includes("please")) {
+      if (q.includes("yes") || q.includes("sure") || q.includes("please")) {
           ctx.state = "collect_contact_info"; 
           ctx.data.userType = "manager_request"; 
           return "Okay. First, what is your name and the best phone number to reach you at?";
@@ -167,19 +206,16 @@ function routeIntent(text, ctx) {
   
   // ─── BOOKING FLOW ───
   if (ctx.state === "confirm_phone") {
-      if (q.includes("no") || q.includes("wrong") || q.includes("wait")) {
+      if (q.includes("no") || q.includes("wrong")) {
           ctx.data.phone = "";
           ctx.state = "collect_phone";
           return "No problem. Let's try again. What is your phone number?";
       }
-      if (q.includes("yes") || q.includes("correct") || q.includes("right") || q.includes("yeah")) {
+      if (q.includes("yes") || q.includes("correct") || q.includes("right")) {
           ctx.state = "closing";
           return "Perfect. I've sent your request to our network. A verified local shop will contact you shortly with a quote. Thanks for choosing Mass Mechanic! Bye now.";
       }
-      const p = ctx.data.phone;
-      const clean = p.slice(0, 10);
-      const formatted = `${clean[0]} ${clean[1]} ${clean[2]}... ${clean[3]} ${clean[4]} ${clean[5]}... ${clean[6]} ${clean[7]} ${clean[8]} ${clean[9]}`;
-      return `Just want to be sure. Is it ${formatted}?`;
+      return `Just want to be sure. Is it ${ctx.data.phone}?`;
   }
 
   if (ctx.state === "collect_phone") {
@@ -189,31 +225,22 @@ function routeIntent(text, ctx) {
     const len = ctx.data.phone.length;
     if (len >= 10) {
       ctx.state = "confirm_phone"; 
-      const p = ctx.data.phone.slice(0, 10);
-      const formatted = `${p[0]} ${p[1]} ${p[2]}... ${p[3]} ${p[4]} ${p[5]}... ${p[6]} ${p[7]} ${p[8]} ${p[9]}`;
-      return `Okay, I have ${formatted}. Is that correct?`;
+      return `Okay, I have ${ctx.data.phone}. Is that correct?`;
     }
     if (len > 0) return `I have ${len} digits so far. What comes next?`;
     return "Okay, noted. What is the best phone number to reach you at?";
   }
 
-  if (q.includes("i am a mechanic") || q.includes("looking for work") || q.includes("partner")) {
+  if (q.includes("mechanic") && (q.includes("looking for work") || q.includes("partner"))) {
       ctx.data.userType = "mechanic";
       return "That's great! We are looking for partners. Please visit mass mechanic dot com and click 'Partner With Us'.";
   }
-  if (q.includes("what is mass mechanic") || q.includes("who are you")) {
-    return "Mass Mechanic is a referral service. We match you with trusted local shops for free quotes. Can I help you find a mechanic today?";
-  }
-  if (q.includes("how much") || q.includes("price") || q.includes("cost")) {
-    return "Our service is 100% free for drivers. You only pay the shop if you choose to hire them.";
-  }
 
   if (ctx.state === "greeting") {
-    if (q.includes("book") || q.includes("schedule") || q.includes("repair") || q.includes("quote") || q.includes("fix") || q.includes("yes") || q.includes("sure") || q.includes("yeah")) {
+    if (q.includes("book") || q.includes("schedule") || q.includes("repair") || q.includes("yes") || q.includes("sure")) {
       ctx.state = "collect_zip";
       return "Great. I can help with that. To find the closest shops to you, what is your Zip Code?";
     }
-    if (q.includes("question") || q.includes("info")) return "Sure, I can answer your questions. What would you like to know?";
     return "Are you looking to find a mechanic for a repair, or do you have questions about how we work?";
   }
 
@@ -254,21 +281,17 @@ function routeIntent(text, ctx) {
     return "Oof, I hear you. That sounds frustrating. I want to match you with a mechanic who can fix that. What's the best phone number for them to contact you?";
   }
 
-  if (ctx.state === "greeting") return "I can help you find a trusted mechanic. Are you looking to get a quote?";
   return "Could you repeat that?";
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 5. AUDIO PIPELINE
+// 6. AUDIO PIPELINE
 // ───────────────────────────────────────────────────────────────────────────────
 async function ttsToMulaw(text) { 
   const url = "https://api.openai.com/v1/audio/speech";
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
+    headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model: "tts-1", voice: "shimmer", input: text, response_format: "pcm" }),
   });
   if (!res.ok) throw new Error(`OpenAI Error: ${res.statusText}`);
@@ -301,10 +324,7 @@ async function speakResponse(ws, text) {
         if (ws._ctx.state === "closing" && ws._currentMsgId === myMsgId) {
            const report = generateReport(ws._ctx.data);
            if (MY_PHONE) sendSms(MY_PHONE, report);
-           
-           // <--- CALLING THE DATABASE SAVE
            saveToSupabase(ws._ctx.data);
-
            setTimeout(() => { if (ws._currentMsgId === myMsgId) ws.close(); }, 3000);
         }
     } catch (e) { console.error(e); } 
@@ -312,9 +332,14 @@ async function speakResponse(ws, text) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 6. SERVER SETUP
+// 7. SERVER SETUP (WEBHOOKS + WEBSOCKETS)
 // ───────────────────────────────────────────────────────────────────────────────
+const server = app.listen(PORT, () => console.log(`MassMechanic Server on ${PORT}`));
 const wss = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+});
 
 wss.on("connection", (ws) => {
   console.log("🔗 Call Connected");
@@ -356,11 +381,9 @@ wss.on("connection", (ws) => {
           ws._messageTimer = setTimeout(() => {
               console.log("Message recording finished.");
               ws._ctx.state = "closing"; 
-              
               const report = generateReport(ws._ctx.data);
               if (MY_PHONE) sendSms(MY_PHONE, report);
               saveToSupabase(ws._ctx.data);
-              
               const reply = "Thanks. I've sent that text to them immediately. They should get back to you soon. Thanks for calling Mass Mechanic! Bye now.";
               speakResponse(ws, reply);
           }, 6000); 
@@ -404,10 +427,4 @@ wss.on("connection", (ws) => {
      console.log("📝 FINAL CAPTURE DATA:");
      console.log(JSON.stringify(ws._ctx.data, null, 2));
   });
-});
-
-const server = app.listen(PORT, () => console.log(`MassMechanic Server on ${PORT}`));
-
-server.on("upgrade", (req, socket, head) => {
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
 });
