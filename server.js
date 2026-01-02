@@ -27,11 +27,11 @@ class ConversationContext {
     this.state = "greeting"; 
     this.data = {
       name: null,
-      zip: null,        // <--- NEW: Location matching
+      zip: null,
       phone: "",       
       makeModel: null, 
       issue: null,     
-      message: null,    // <--- NEW: For "Tell Tom" messages
+      message: null,    
       userType: "driver"
     };
   }
@@ -88,17 +88,30 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // ─── SPECIAL: Message Taking (Tom/Manager) ───
+  // ─── SPECIAL: Manager/Operator Flow ───
+  
+  // Step 2: Confirm they want to connect
+  if (ctx.state === "confirm_manager") {
+      if (q.includes("yes") || q.includes("yeah") || q.includes("sure") || q.includes("please") || q.includes("do that")) {
+          ctx.state = "take_message";
+          return "Great. Leave your message with me and I'll text a team member about your concern. What would you like me to tell them?";
+      }
+      // If they say "No" or ask something else, go back to helping
+      ctx.state = "greeting";
+      return "Okay, no problem. I can help you find a mechanic or answer general questions. How can I help?";
+  }
+
+  // Step 3: Record the message
   if (ctx.state === "take_message") {
       ctx.data.message = text;
-      ctx.state = "closing"; // or ask for name
-      return "Thanks. I've sent that text to him immediately. He should get back to you soon. Thanks for calling Mass Mechanic.";
+      ctx.state = "closing"; 
+      return "Thanks. I've sent that text to them immediately. They should get back to you soon. Thanks for calling Mass Mechanic! Bye now.";
   }
   
-  // Trigger for message taking (Global)
-  if (q.includes("tom") || q.includes("manager") || q.includes("owner") || q.includes("supervisor") || q.includes("speak to a person")) {
-      ctx.state = "take_message";
-      return "Tom is currently tying up a deal with a shop, but I can take a message and text it to him immediately. What would you like me to tell him?";
+  // Step 1: Trigger (Global)
+  if (q.includes("manager") || q.includes("operator") || q.includes("supervisor") || q.includes("owner") || q.includes("speak with") || q.includes("talk to a person") || q.includes("real person")) {
+      ctx.state = "confirm_manager";
+      return "Would you like me to connect you with a member of our team?";
   }
 
   // ─── 1. Phone Confirmation ───
@@ -157,42 +170,36 @@ function routeIntent(text, ctx) {
 
   // State: Greeting (Fork in the road)
   if (ctx.state === "greeting") {
-    // If they explicitly say they want to book/schedule
     if (q.includes("book") || q.includes("schedule") || q.includes("repair") || q.includes("quote") || q.includes("fix") || q.includes("find")) {
       ctx.state = "collect_zip";
       return "Great. I can help with that. To find the closest shops to you, what is your Zip Code?";
     }
-    // If they have a question
     if (q.includes("question") || q.includes("info")) {
         return "Sure, I can answer your questions. What would you like to know about Mass Mechanic?";
     }
-    // Default fallback if they just say "Hi"
     return "Are you looking to find a mechanic for a repair, or do you have questions about how we work?";
   }
 
-  // State: Collect Zip (NEW)
+  // State: Collect Zip
   if (ctx.state === "collect_zip") {
-      // Extract any 5 digit number
       const zipMatch = text.match(/\b\d{5}\b/) || text.match(/(\d\s*){5}/);
       if (zipMatch) {
           ctx.data.zip = zipMatch[0].replace(/\s/g, '');
           ctx.state = "collect_details";
           return "Thanks. And what is the Year, Make, and Model of your car?";
       }
-      // If they gave a city name instead
       if (text.length > 3) {
-          ctx.data.zip = text; // Store city as zip for now
+          ctx.data.zip = text; 
           ctx.state = "collect_details";
           return "Got it. What is the Year, Make, and Model of the vehicle?";
       }
       return "I need a Zip Code or City to find mechanics near you. Where are you located?";
   }
 
-  // State: Vehicle Details (With "I Have" Fix)
+  // State: Vehicle Details
   if (ctx.state === "collect_details") {
-    // <--- FIX: Ignore short filler phrases
     if (text.length < 10 && (q.includes("i have") || q.includes("it is") || q.includes("my car is"))) {
-        return null; // Don't speak, just wait for more input
+        return null; 
     }
 
     const isJustYear = text.match(/^(19|20)\d{2}$/) || text.match(/^(nineteen|twenty)/i);
@@ -219,7 +226,6 @@ function routeIntent(text, ctx) {
   }
 
   if (ctx.state === "greeting") {
-      // Fallback if they say something weird at the start
       return "I can help you find a trusted mechanic. Are you looking to get a quote?";
   }
 
@@ -292,7 +298,6 @@ wss.on("connection", (ws) => {
       ws._currentMsgId++; 
 
       const reply = routeIntent(transcript, ws._ctx);
-      // <--- FIX: If reply is null (ignored filler), don't speak
       if (!reply) return; 
 
       console.log(`Bot: ${reply}`);
@@ -332,8 +337,7 @@ wss.on("connection", (ws) => {
     if (data.event === "start") {
       ws._streamSid = data.start.streamSid;
       console.log("Call Started");
-      // Updated Greeting for Fork in the Road
-      const greeting = "Hi! Thanks for calling Mass Mechanic. I can match you with a trusted local shop for a free quote. Are you looking to schedule a repair, or do you have general questions?";
+      const greeting = "Hi! Thanks for calling Mass Mechanic. I can connect you with a trusted local mechanic for a free quote. Are you looking to schedule a repair, or do you have general questions?";
       (async () => {
          ws._speaking = true;
          ws._currentMsgId++;
