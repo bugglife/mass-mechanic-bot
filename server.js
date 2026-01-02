@@ -39,24 +39,46 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 // ───────────────────────────────────────────────────────────────────────────────
 // 2. NEW: SMS AUTO-REPLY BOT
 // ───────────────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────
+// NEW: SMS AUTO-REPLY BOT (WITH MEMORY)
+// ───────────────────────────────────────────────────────────────────────────────
 app.post('/sms', async (req, res) => {
     const incomingMsg = req.body.Body;
     const fromNumber = req.body.From;
     
     console.log(`📩 SMS Received from ${fromNumber}: ${incomingMsg}`);
 
-    // 1. Define the Bot's Personality for Texting
+    // 1. Define the Bot's Personality
     const systemPrompt = `
     You are the SMS assistant for Mass Mechanic.
     - We are a referral service, NOT a repair shop.
     - We connect drivers with trusted local mechanics in Massachusetts for free quotes.
     - Our service is 100% free for drivers.
-    - If they want to book, ask for their Zip Code and Car Make/Model.
-    - Keep answers short (under 160 chars if possible) and friendly.
+    - GOAL: Get their Zip Code and Car Make/Model.
+    - Once you have both Zip and Car, tell them: "Thanks! I have sent your request to a local shop. They will text you shortly with a quote."
+    - Keep answers short (under 160 chars) and friendly.
     `;
 
     try {
-        // 2. Ask OpenAI for a reply
+        // 2. RETRIEVE HISTORY (The Memory Fix)
+        const { data: history } = await supabase
+            .from('sms_chat_history')
+            .select('role, content')
+            .eq('phone', fromNumber)
+            .order('created_at', { ascending: true }) 
+            .limit(6); // Remember last 6 texts
+
+        // 3. CONSTRUCT CONVERSATION FOR AI
+        // We map the DB history to OpenAI format
+        const pastMessages = (history || []).map(msg => ({ role: msg.role, content: msg.content }));
+        
+        const messagesToSend = [
+            { role: "system", content: systemPrompt },
+            ...pastMessages,
+            { role: "user", content: incomingMsg }
+        ];
+
+        // 4. ASK OPENAI
         const gptResponse = await fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -64,19 +86,22 @@ app.post('/sms', async (req, res) => {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                model: "gpt-4o", // Or gpt-3.5-turbo
-                messages: [
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: incomingMsg }
-                ],
-                max_tokens: 100
+                model: "gpt-4o", 
+                messages: messagesToSend,
+                max_tokens: 150
             })
         });
 
         const data = await gptResponse.json();
         const replyText = data.choices[0].message.content;
 
-        // 3. Send reply back to Twilio (TwiML)
+        // 5. SAVE NEW CONVERSATION TO DB
+        await supabase.from('sms_chat_history').insert([
+            { phone: fromNumber, role: 'user', content: incomingMsg },
+            { phone: fromNumber, role: 'assistant', content: replyText }
+        ]);
+
+        // 6. SEND REPLY TO TWILIO
         const twiml = new twilio.twiml.MessagingResponse();
         twiml.message(replyText);
 
