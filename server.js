@@ -30,7 +30,8 @@ class ConversationContext {
       phone: "",       
       makeModel: null, 
       issue: null,     
-      appointment: null
+      appointment: null,
+      userType: "driver" // 'driver' or 'mechanic'
     };
   }
 }
@@ -103,7 +104,7 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // 1. Phone Confirmation (The Safety Net)
+  // ─── 1. PRIORITY: Phone Confirmation ───
   if (ctx.state === "confirm_phone") {
       if (q.includes("no") || q.includes("wrong") || q.includes("incorrect") || q.includes("wait")) {
           ctx.data.phone = "";
@@ -112,8 +113,7 @@ function routeIntent(text, ctx) {
       }
       if (q.includes("yes") || q.includes("correct") || q.includes("right") || q.includes("yeah") || q.includes("yep")) {
           ctx.state = "closing";
-          // <--- FIX: Added "Bye now"
-          return "Perfect. I'll have a senior mechanic call you shortly. Thanks for calling Mass Mechanic! Bye now.";
+          return "Perfect. We'll send this request out to our verified network and have a local mechanic contact you shortly with a quote. Thanks for choosing Mass Mechanic! Bye now.";
       }
       
       const p = ctx.data.phone;
@@ -122,10 +122,9 @@ function routeIntent(text, ctx) {
       return `Just want to make sure I got that right. Is it ${formatted}?`;
   }
 
-  // 2. Phone Collection
+  // ─── 2. PRIORITY: Phone Collection ───
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
-    
     if (extracted) {
         if (ctx.data.phone.length > 0 || extracted.length >= 3) {
             ctx.data.phone += extracted;
@@ -162,28 +161,50 @@ function routeIntent(text, ctx) {
     return "Okay, noted. What is the best phone number to reach you at?";
   }
 
-  // 3. Global Commands
-  if (q.includes("where") || q.includes("location") || q.includes("address") || q.includes("located")) {
-    return "We are located at 123 Main Street in Boston. Can I help you schedule a repair?";
-  }
-  if (q.includes("hour") || q.includes("open") || q.includes("close")) {
-    return "Mass Mechanic is open 8 AM to 6 PM, Monday through Friday.";
+  // ─── 3. PRIORITY: FAQ KNOWLEDGE BASE (UPDATED FOR PLATFORM) ───
+
+  // Mechanic/Vendor Inquiries (I am a mechanic looking for work)
+  if (q.includes("i am a mechanic") || q.includes("looking for work") || q.includes("get leads") || q.includes("partner") || q.includes("join network")) {
+      ctx.data.userType = "mechanic";
+      return "That's great! We are always looking for trusted partners. To join our network and get free trial leads, please visit mass mechanic dot com and click 'Partner With Us' at the top of the page.";
   }
 
-  // 4. Greeting State
+  // Identity / "How it works"
+  if (q.includes("what is mass mechanic") || q.includes("who are you") || q.includes("what do you do") || q.includes("referral") || q.includes("real shop")) {
+    return "Mass Mechanic is a referral service that connects you with verified local mechanics. We don't do the repairs ourselves; instead, we match you with trusted shops in your area who will give you a free quote. Can I help you find a mechanic today?";
+  }
+
+  // Pricing (For Drivers)
+  if (q.includes("how much") || q.includes("price") || q.includes("cost") || q.includes("fee") || q.includes("charge")) {
+    return "Our service is 100% free for drivers. You only pay the mechanic directly if you choose to hire them. Would you like to get a free quote?";
+  }
+
+  // Vetting / Trust
+  if (q.includes("verified") || q.includes("trust") || q.includes("safe") || q.includes("licensed")) {
+    return "Yes, every mechanic in our network is carefully vetted. They must be licensed, insured, and maintain high customer ratings. Can I help you find a mechanic for your car?";
+  }
+
+  // Location / Coverage
+  if (q.includes("where") || q.includes("location") || q.includes("address") || q.includes("area")) {
+    return "We serve drivers across Massachusetts, including Brockton, Fall River, and New Bedford. Since we connect you with local shops, we can help you find someone nearby. Where are you located?";
+  }
+
+  // ─── 4. BOOKING FLOW (Lead Gen) ───
+
+  // State: Greeting
   if (ctx.state === "greeting") {
     if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw") || q.includes("volvo") || q.includes("jeep")) {
       ctx.data.makeModel = text;
       ctx.state = "collect_issue";
-      return "Got it. I can definitely help get that checked out. What seems to be the problem with the vehicle?";
+      return "Got it. I can find a specialist for that vehicle. What seems to be the problem with it?";
     }
-    if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair") || q.includes("help") || q.includes("car")) {
+    if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair") || q.includes("help") || q.includes("car") || q.includes("quote")) {
       ctx.state = "collect_details";
-      return "I'd be happy to help you with that. To get started, what is the Year, Make, and Model of your car?";
+      return "I'd be happy to help you find a mechanic. To get started, what is the Year, Make, and Model of your car?";
     }
   }
 
-  // 5. Vehicle Details
+  // State: Vehicle Details
   if (ctx.state === "collect_details") {
     const isJustYear = text.match(/^(19|20)\d{2}$/) || text.match(/^(nineteen|twenty)/i);
     if (isJustYear && text.split(" ").length < 4) {
@@ -201,22 +222,23 @@ function routeIntent(text, ctx) {
     return "Okay, got it. And can you tell me a little bit about what's going on with it?";
   }
 
-  // 6. Issue Details
+  // State: Issue Details
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
     if (text.split(" ").length < 4) {
-        return "Understood. I'd like to have a mechanic look at that. What's the best phone number to reach you at?";
+        return "Understood. I can match you with a shop that handles that. What's the best phone number to reach you at?";
     }
-    return "Oof, I hear you. That sounds frustrating. I want to get a pro to take a look at that as soon as possible. What's the best phone number to reach you at? You can start with just the area code.";
+    // Updated empathy script to reflect "Matching" vs "Fixing"
+    return "Oof, I hear you. That sounds frustrating. I want to match you with a highly-rated mechanic who can fix that. What's the best phone number for them to contact you?";
   }
 
   if (ctx.state === "greeting") {
       ctx.state = "collect_details";
-      return "I can help you schedule a repair. What kind of car do you have?";
+      return "I can help you find a trusted mechanic for free. What kind of car do you have?";
   }
 
-  return "Could you repeat that? I can help you schedule a repair.";
+  return "Could you repeat that? I can help you find a mechanic.";
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -326,7 +348,8 @@ wss.on("connection", (ws) => {
     if (data.event === "start") {
       ws._streamSid = data.start.streamSid;
       console.log("Call Started");
-      const greeting = "Hi! Thanks for calling Mass Mechanic. I can help you schedule a repair or answer questions. How can I help?";
+      // Updated Greeting for a Network/Referral Service
+      const greeting = "Hi! Thanks for calling Mass Mechanic. I can connect you with a trusted local mechanic for a free quote. How can I help?";
       (async () => {
          ws._speaking = true;
          ws._currentMsgId++;
