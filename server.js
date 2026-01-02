@@ -106,17 +106,16 @@ function routeIntent(text, ctx) {
   // 1. Phone Confirmation (The Safety Net)
   if (ctx.state === "confirm_phone") {
       if (q.includes("no") || q.includes("wrong") || q.includes("incorrect") || q.includes("wait")) {
-          // Reset and try again
           ctx.data.phone = "";
           ctx.state = "collect_phone";
           return "Oh, sorry about that. Let's try again. What is your phone number? You can start with just the area code.";
       }
       if (q.includes("yes") || q.includes("correct") || q.includes("right") || q.includes("yeah") || q.includes("yep")) {
-          // Confirmed!
           ctx.state = "closing";
-          return "Perfect. I'll have a senior mechanic call you shortly. Thanks for calling Mass Mechanic!";
+          // <--- FIX: Added "Bye now"
+          return "Perfect. I'll have a senior mechanic call you shortly. Thanks for calling Mass Mechanic! Bye now.";
       }
-      // If they say something ambiguous, just ask again
+      
       const p = ctx.data.phone;
       const clean = p.slice(0, 10);
       const formatted = `${clean[0]} ${clean[1]} ${clean[2]}... ${clean[3]} ${clean[4]} ${clean[5]}... ${clean[6]} ${clean[7]} ${clean[8]} ${clean[9]}`;
@@ -136,7 +135,6 @@ function routeIntent(text, ctx) {
     const len = ctx.data.phone.length;
     const p = ctx.data.phone;
 
-    // <--- CHANGE: Go to 'confirm_phone' instead of 'closing'
     if (len >= 10) {
       ctx.state = "confirm_phone"; 
       const clean = p.slice(0, 10);
