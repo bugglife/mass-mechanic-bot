@@ -31,7 +31,7 @@ class ConversationContext {
       phone: "",       
       makeModel: null, 
       issue: null,     
-      message: "",      // <--- Buffer for the long message
+      message: "",      
       userType: "driver"
     };
   }
@@ -88,7 +88,7 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // ─── SPECIAL: Manager Flow (Confirming) ───
+  // ─── SPECIAL: Manager Flow ───
   if (ctx.state === "confirm_manager") {
       if (q.includes("yes") || q.includes("yeah") || q.includes("sure") || q.includes("please") || q.includes("do that")) {
           ctx.state = "take_message";
@@ -98,7 +98,6 @@ function routeIntent(text, ctx) {
       return "Okay, no problem. I can help you find a mechanic or answer general questions. How can I help?";
   }
   
-  // Trigger (Global)
   if (q.includes("manager") || q.includes("operator") || q.includes("supervisor") || q.includes("owner") || q.includes("speak with") || q.includes("talk to a person") || q.includes("real person")) {
       ctx.state = "confirm_manager";
       return "Would you like me to connect you with a member of our team?";
@@ -254,7 +253,6 @@ async function ttsToMulaw(text) {
   });
 }
 
-// Helper to stream audio to WebSocket
 async function speakResponse(ws, text) {
     ws._speaking = true;
     const myMsgId = ++ws._currentMsgId;
@@ -262,7 +260,7 @@ async function speakResponse(ws, text) {
 
     try {
         const audio = await ttsToMulaw(text);
-        if (ws._currentMsgId !== myMsgId) return; // Barge-in happened
+        if (ws._currentMsgId !== myMsgId) return; 
 
         const FRAME_SIZE = 160; 
         for (let i = 0; i < audio.length; i += FRAME_SIZE) {
@@ -272,7 +270,6 @@ async function speakResponse(ws, text) {
             await new Promise(r => setTimeout(r, 20));
         }
 
-        // Handle Hangup if this was the last message
         if (ws._ctx.state === "closing" && ws._currentMsgId === myMsgId) {
            setTimeout(() => { if (ws._currentMsgId === myMsgId) ws.close(); }, 3000);
         }
@@ -296,7 +293,7 @@ wss.on("connection", (ws) => {
   ws._ctx = new ConversationContext();
   ws._speaking = false;
   ws._currentMsgId = 0; 
-  ws._messageTimer = null; // Timer for voicemail buffer
+  ws._messageTimer = null; 
 
   const dg = new WebSocket(`wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&endpointing=true`, {
     headers: { Authorization: `Token ${DG_KEY}` }
@@ -310,32 +307,28 @@ wss.on("connection", (ws) => {
       
       console.log(`User: ${transcript}`);
 
-      // 1. ZOMBIE KILL SWITCH (If closing, ignore everything)
       if (ws._ctx.state === "closing") {
           console.log("Ignored input (Closing state active)");
           return;
       }
       
-      // 2. VOICEMAIL BUFFER LOGIC (The "Patient Listener")
+      // <--- CHANGED: Logic for message taking buffering
       if (ws._ctx.state === "take_message") {
-          // Add to buffer
           ws._ctx.data.message += " " + transcript;
           
-          // Reset the silence timer
           if (ws._messageTimer) clearTimeout(ws._messageTimer);
           
-          // Wait 2.5 seconds for silence before sending
+          // <--- INCREASED: Wait 6 seconds (6000ms) for silence
           ws._messageTimer = setTimeout(() => {
               console.log("Message recording finished.");
-              ws._ctx.state = "closing"; // Lock it
+              ws._ctx.state = "closing"; 
               const reply = "Thanks. I've sent that text to them immediately. They should get back to you soon. Thanks for calling Mass Mechanic! Bye now.";
               speakResponse(ws, reply);
-          }, 2500);
+          }, 6000);
           
-          return; // STOP here. Don't run routeIntent.
+          return; 
       }
       
-      // 3. NORMAL CONVERSATION
       if (ws._speaking) {
          console.log("!! Barge-in: Clearing audio !!");
          ws.send(JSON.stringify({ event: "clear", streamSid: ws._streamSid }));
