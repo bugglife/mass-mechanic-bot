@@ -56,7 +56,6 @@ function extractPhoneNumber(text) {
   let digits = '';
   const words = q.split(/\s+/);
   
-  // Standard regex match
   const match = q.match(/(\d{3})[\s.-]?(\d{3})[\s.-]?(\d{4})/);
   if (match) return match[0].replace(/\D/g, '');
 
@@ -64,13 +63,11 @@ function extractPhoneNumber(text) {
   while (i < words.length) {
     const word = words[i];
 
-    // 1. Handle "Two Hundred" -> 200
     if (word === 'hundred') {
         digits += "00";
         i++; continue;
     }
 
-    // 2. Handle "Thirty", "Sixty-four"
     if (TENS_MAP[word]) {
        const firstDigit = TENS_MAP[word];
        if (i + 1 < words.length && NUMBER_WORDS_MAP[words[i+1]] && NUMBER_WORDS_MAP[words[i+1]].length === 1) {
@@ -82,7 +79,6 @@ function extractPhoneNumber(text) {
        }
     }
 
-    // 3. Handle "double 5"
     if (word === 'double' && i + 1 < words.length) {
       const nextDigit = NUMBER_WORDS_MAP[words[i + 1]];
       if (nextDigit && nextDigit.length === 1) {
@@ -91,7 +87,6 @@ function extractPhoneNumber(text) {
       }
     }
     
-    // 4. Standard words
     if (NUMBER_WORDS_MAP[word] && NUMBER_WORDS_MAP[word].length === 1) {
       digits += NUMBER_WORDS_MAP[word];
     } else if (/^\d+$/.test(word)) {
@@ -108,11 +103,30 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // 1. Phone Collection
+  // 1. Phone Confirmation (The Safety Net)
+  if (ctx.state === "confirm_phone") {
+      if (q.includes("no") || q.includes("wrong") || q.includes("incorrect") || q.includes("wait")) {
+          // Reset and try again
+          ctx.data.phone = "";
+          ctx.state = "collect_phone";
+          return "Oh, sorry about that. Let's try again. What is your phone number? You can start with just the area code.";
+      }
+      if (q.includes("yes") || q.includes("correct") || q.includes("right") || q.includes("yeah") || q.includes("yep")) {
+          // Confirmed!
+          ctx.state = "closing";
+          return "Perfect. I'll have a senior mechanic call you shortly. Thanks for calling Mass Mechanic!";
+      }
+      // If they say something ambiguous, just ask again
+      const p = ctx.data.phone;
+      const clean = p.slice(0, 10);
+      const formatted = `${clean[0]} ${clean[1]} ${clean[2]}... ${clean[3]} ${clean[4]} ${clean[5]}... ${clean[6]} ${clean[7]} ${clean[8]} ${clean[9]}`;
+      return `Just want to make sure I got that right. Is it ${formatted}?`;
+  }
+
+  // 2. Phone Collection
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
     
-    // V70/Model protection
     if (extracted) {
         if (ctx.data.phone.length > 0 || extracted.length >= 3) {
             ctx.data.phone += extracted;
@@ -121,6 +135,14 @@ function routeIntent(text, ctx) {
     
     const len = ctx.data.phone.length;
     const p = ctx.data.phone;
+
+    // <--- CHANGE: Go to 'confirm_phone' instead of 'closing'
+    if (len >= 10) {
+      ctx.state = "confirm_phone"; 
+      const clean = p.slice(0, 10);
+      const formatted = `${clean[0]} ${clean[1]} ${clean[2]}... ${clean[3]} ${clean[4]} ${clean[5]}... ${clean[6]} ${clean[7]} ${clean[8]} ${clean[9]}`;
+      return `Okay, I have ${formatted}. Is that correct?`;
+    }
 
     if (len === 3) {
        return `Got it, area code ${p.split('').join(' ')}. What are the next three digits?`;
@@ -132,12 +154,6 @@ function routeIntent(text, ctx) {
     if (len === 9) {
        return `Almost there. Just one digit left. What is the last number?`;
     }
-    if (len >= 10) {
-      ctx.state = "closing"; 
-      const clean = p.slice(0, 10);
-      const formatted = `${clean[0]} ${clean[1]} ${clean[2]}... ${clean[3]} ${clean[4]} ${clean[5]}... ${clean[6]} ${clean[7]} ${clean[8]} ${clean[9]}`;
-      return `Perfect, I have ${formatted}. I'll have a senior mechanic call you shortly to confirm the details. Thanks for calling Mass Mechanic!`;
-    }
     
     if (len > 0) {
        if (len < 3) return `I have ${p.split('').join(' ')} so far. What is the rest of the area code?`;
@@ -148,7 +164,7 @@ function routeIntent(text, ctx) {
     return "Okay, noted. What is the best phone number to reach you at?";
   }
 
-  // 2. Global Commands
+  // 3. Global Commands
   if (q.includes("where") || q.includes("location") || q.includes("address") || q.includes("located")) {
     return "We are located at 123 Main Street in Boston. Can I help you schedule a repair?";
   }
@@ -156,7 +172,7 @@ function routeIntent(text, ctx) {
     return "Mass Mechanic is open 8 AM to 6 PM, Monday through Friday.";
   }
 
-  // 3. Greeting State
+  // 4. Greeting State
   if (ctx.state === "greeting") {
     if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw") || q.includes("volvo") || q.includes("jeep")) {
       ctx.data.makeModel = text;
@@ -169,16 +185,14 @@ function routeIntent(text, ctx) {
     }
   }
 
-  // 4. Vehicle Details
+  // 5. Vehicle Details
   if (ctx.state === "collect_details") {
-    // Year check
     const isJustYear = text.match(/^(19|20)\d{2}$/) || text.match(/^(nineteen|twenty)/i);
     if (isJustYear && text.split(" ").length < 4) {
          ctx.data.makeModel = text; 
          return `Okay, ${text}. And what is the Make and Model?`;
     }
 
-    // Append to existing year if present
     if (ctx.data.makeModel) {
         ctx.data.makeModel += " " + text;
     } else {
@@ -189,7 +203,7 @@ function routeIntent(text, ctx) {
     return "Okay, got it. And can you tell me a little bit about what's going on with it?";
   }
 
-  // 5. Issue Details
+  // 6. Issue Details
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
@@ -203,6 +217,7 @@ function routeIntent(text, ctx) {
       ctx.state = "collect_details";
       return "I can help you schedule a repair. What kind of car do you have?";
   }
+
   return "Could you repeat that? I can help you schedule a repair.";
 }
 
@@ -335,7 +350,6 @@ wss.on("connection", (ws) => {
     if (data.event === "stop") dg.close();
   });
 
-  // <--- NEW: Print the "Receipt" when the call ends
   ws.on("close", () => {
      console.log("🔴 Call Ended");
      console.log("📝 FINAL CAPTURE DATA:");
