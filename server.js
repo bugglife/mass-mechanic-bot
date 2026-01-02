@@ -40,7 +40,7 @@ class ConversationContext {
       makeModel: null, 
       issue: null,     
       message: "",
-      manualContact: null, // <--- NEW: Stores Name/Number they speak manually
+      manualContact: "", // <--- Stores "Bob, 508-555..."
       userType: "driver"
     };
   }
@@ -106,7 +106,7 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // ─── MANAGER FLOW (UPDATED) ───
+  // ─── MANAGER FLOW ───
   
   // Step 1: Trigger
   if (q.includes("manager") || q.includes("operator") || q.includes("supervisor") || q.includes("owner") || q.includes("speak with") || q.includes("talk to a person") || q.includes("real person")) {
@@ -114,22 +114,18 @@ function routeIntent(text, ctx) {
       return "Would you like me to connect you with a member of our team?";
   }
 
-  // Step 2: Confirm -> Ask for Contact Info (NEW)
+  // Step 2: Confirm -> Ask for Contact Info
   if (ctx.state === "confirm_manager") {
       if (q.includes("yes") || q.includes("yeah") || q.includes("sure") || q.includes("please")) {
-          ctx.state = "collect_contact_info"; // <--- Move to new state
+          ctx.state = "collect_contact_info"; 
           return "Okay. First, what is your name and the best phone number to reach you at?";
       }
       ctx.state = "greeting";
       return "Okay, no problem. I can help you find a mechanic or answer general questions. How can I help?";
   }
-
-  // Step 3: Capture Name/Number -> Start Recording (NEW)
-  if (ctx.state === "collect_contact_info") {
-      ctx.data.manualContact = text; // Save what they said (e.g. "Tom 508-555...")
-      ctx.state = "take_message";
-      return "Thanks. Go ahead with your message, and I'll text it to them immediately.";
-  }
+  
+  // NOTE: The "collect_contact_info" logic is now handled in the BUFFER section below (dg.on)
+  // We removed it from here so it doesn't trigger immediately.
 
   // ─── BOOKING FLOW ───
   if (ctx.state === "confirm_phone") {
@@ -281,6 +277,7 @@ wss.on("connection", (ws) => {
   ws._speaking = false;
   ws._currentMsgId = 0; 
   ws._messageTimer = null; 
+  ws._contactTimer = null; // <--- NEW: Timer for Contact Info Buffer
 
   const dg = new WebSocket(`wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&endpointing=true`, {
     headers: { Authorization: `Token ${DG_KEY}` }
@@ -294,11 +291,27 @@ wss.on("connection", (ws) => {
       console.log(`User: ${transcript}`);
 
       if (ws._ctx.state === "closing") return; 
+
+      // ─── 1. BUFFER: CONTACT INFO (Wait 3s for silence) ───
+      if (ws._ctx.state === "collect_contact_info") {
+          ws._ctx.data.manualContact += " " + transcript;
+          console.log(`📝 Contact Buffer: "${ws._ctx.data.manualContact.trim()}"`);
+
+          if (ws._contactTimer) clearTimeout(ws._contactTimer);
+          
+          ws._contactTimer = setTimeout(() => {
+              // Wait 3 seconds of silence, THEN move on
+              ws._ctx.state = "take_message";
+              const reply = "Thanks. Go ahead with your message, and I'll text it to them immediately.";
+              speakResponse(ws, reply);
+          }, 3000); 
+          return;
+      }
       
-      // ─── VOICEMAIL LOGIC ───
+      // ─── 2. BUFFER: VOICEMAIL (Wait 6s for silence) ───
       if (ws._ctx.state === "take_message") {
           ws._ctx.data.message += " " + transcript;
-          console.log(`📝 Buffer: "${ws._ctx.data.message.trim()}"`);
+          console.log(`📝 Message Buffer: "${ws._ctx.data.message.trim()}"`);
 
           if (ws._messageTimer) clearTimeout(ws._messageTimer);
           
@@ -306,13 +319,10 @@ wss.on("connection", (ws) => {
               console.log("Message recording finished.");
               ws._ctx.state = "closing"; 
               
-              // <--- SMS CONSTRUCTION (Using the manually given contact info)
               const who = ws._ctx.data.manualContact || ws._ctx.data.callerId || "Unknown";
               const note = `📞 Voicemail from:\n${who}\n\nMessage:\n"${ws._ctx.data.message.trim()}"`;
               
               if (MY_PHONE) sendSms(MY_PHONE, note);
-
-              // Don't send confirmation to the user here because 'manualContact' might contain words like "It's Tom" which isn't a valid phone number.
               
               const reply = "Thanks. I've sent that text to them immediately. They should get back to you soon. Thanks for calling Mass Mechanic! Bye now.";
               speakResponse(ws, reply);
@@ -320,6 +330,7 @@ wss.on("connection", (ws) => {
           return; 
       }
       
+      // ─── 3. NORMAL CONVERSATION ───
       if (ws._speaking) {
          console.log("!! Barge-in: Clearing audio !!");
          ws.send(JSON.stringify({ event: "clear", streamSid: ws._streamSid }));
