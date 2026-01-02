@@ -27,17 +27,18 @@ class ConversationContext {
     this.state = "greeting"; 
     this.data = {
       name: null,
+      zip: null,        // <--- NEW: Location matching
       phone: "",       
       makeModel: null, 
       issue: null,     
-      appointment: null,
-      userType: "driver" // 'driver' or 'mechanic'
+      message: null,    // <--- NEW: For "Tell Tom" messages
+      userType: "driver"
     };
   }
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 3. UTILITIES (Phone Number Extraction)
+// 3. UTILITIES
 // ───────────────────────────────────────────────────────────────────────────────
 const NUMBER_WORDS_MAP = {
   'zero': '0', 'oh': '0', 'o': '0', 'one': '1', 'won': '1',
@@ -63,36 +64,19 @@ function extractPhoneNumber(text) {
   let i = 0;
   while (i < words.length) {
     const word = words[i];
-
-    if (word === 'hundred') {
-        digits += "00";
-        i++; continue;
-    }
-
+    if (word === 'hundred') { digits += "00"; i++; continue; }
     if (TENS_MAP[word]) {
        const firstDigit = TENS_MAP[word];
        if (i + 1 < words.length && NUMBER_WORDS_MAP[words[i+1]] && NUMBER_WORDS_MAP[words[i+1]].length === 1) {
-           digits += firstDigit + NUMBER_WORDS_MAP[words[i+1]];
-           i += 2; continue;
-       } else {
-           digits += firstDigit + '0';
-           i++; continue;
-       }
+           digits += firstDigit + NUMBER_WORDS_MAP[words[i+1]]; i += 2; continue;
+       } else { digits += firstDigit + '0'; i++; continue; }
     }
-
     if (word === 'double' && i + 1 < words.length) {
       const nextDigit = NUMBER_WORDS_MAP[words[i + 1]];
-      if (nextDigit && nextDigit.length === 1) {
-        digits += nextDigit + nextDigit;
-        i += 2; continue;
-      }
+      if (nextDigit && nextDigit.length === 1) { digits += nextDigit + nextDigit; i += 2; continue; }
     }
-    
-    if (NUMBER_WORDS_MAP[word] && NUMBER_WORDS_MAP[word].length === 1) {
-      digits += NUMBER_WORDS_MAP[word];
-    } else if (/^\d+$/.test(word)) {
-      digits += word;
-    }
+    if (NUMBER_WORDS_MAP[word] && NUMBER_WORDS_MAP[word].length === 1) { digits += NUMBER_WORDS_MAP[word]; } 
+    else if (/^\d+$/.test(word)) { digits += word; }
     i++;
   }
   return digits.length > 0 ? digits : null;
@@ -104,33 +88,42 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // ─── 1. PRIORITY: Phone Confirmation ───
+  // ─── SPECIAL: Message Taking (Tom/Manager) ───
+  if (ctx.state === "take_message") {
+      ctx.data.message = text;
+      ctx.state = "closing"; // or ask for name
+      return "Thanks. I've sent that text to him immediately. He should get back to you soon. Thanks for calling Mass Mechanic.";
+  }
+  
+  // Trigger for message taking (Global)
+  if (q.includes("tom") || q.includes("manager") || q.includes("owner") || q.includes("supervisor") || q.includes("speak to a person")) {
+      ctx.state = "take_message";
+      return "Tom is currently tying up a deal with a shop, but I can take a message and text it to him immediately. What would you like me to tell him?";
+  }
+
+  // ─── 1. Phone Confirmation ───
   if (ctx.state === "confirm_phone") {
       if (q.includes("no") || q.includes("wrong") || q.includes("incorrect") || q.includes("wait")) {
           ctx.data.phone = "";
           ctx.state = "collect_phone";
-          return "Oh, sorry about that. Let's try again. What is your phone number? You can start with just the area code.";
+          return "No problem. Let's try again. What is your phone number? You can start with just the area code.";
       }
       if (q.includes("yes") || q.includes("correct") || q.includes("right") || q.includes("yeah") || q.includes("yep")) {
           ctx.state = "closing";
-          return "Perfect. We'll send this request out to our verified network and have a local mechanic contact you shortly with a quote. Thanks for choosing Mass Mechanic! Bye now.";
+          return "Perfect. I've sent your request to our network. A verified local shop will contact you shortly with a quote. Thanks for choosing Mass Mechanic! Bye now.";
       }
-      
       const p = ctx.data.phone;
       const clean = p.slice(0, 10);
       const formatted = `${clean[0]} ${clean[1]} ${clean[2]}... ${clean[3]} ${clean[4]} ${clean[5]}... ${clean[6]} ${clean[7]} ${clean[8]} ${clean[9]}`;
-      return `Just want to make sure I got that right. Is it ${formatted}?`;
+      return `Just want to be sure. Is it ${formatted}?`;
   }
 
-  // ─── 2. PRIORITY: Phone Collection ───
+  // ─── 2. Phone Collection ───
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
     if (extracted) {
-        if (ctx.data.phone.length > 0 || extracted.length >= 3) {
-            ctx.data.phone += extracted;
-        }
+        if (ctx.data.phone.length > 0 || extracted.length >= 3) ctx.data.phone += extracted;
     }
-    
     const len = ctx.data.phone.length;
     const p = ctx.data.phone;
 
@@ -140,83 +133,76 @@ function routeIntent(text, ctx) {
       const formatted = `${clean[0]} ${clean[1]} ${clean[2]}... ${clean[3]} ${clean[4]} ${clean[5]}... ${clean[6]} ${clean[7]} ${clean[8]} ${clean[9]}`;
       return `Okay, I have ${formatted}. Is that correct?`;
     }
-
-    if (len === 3) {
-       return `Got it, area code ${p.split('').join(' ')}. What are the next three digits?`;
-    }
-    if (len === 6) {
-       const last3 = p.slice(3, 6).split('').join(' ');
-       return `Okay, ${last3}. And the last four?`;
-    }
-    if (len === 9) {
-       return `Almost there. Just one digit left. What is the last number?`;
-    }
-    
-    if (len > 0) {
-       if (len < 3) return `I have ${p.split('').join(' ')} so far. What is the rest of the area code?`;
-       if (len < 6) return `I have the area code. What are the next three digits?`;
-       return `Sorry, I missed that last part. I have ${len} digits so far. What are the last few?`;
-    }
+    if (len === 3) return `Got it, area code ${p.split('').join(' ')}. What are the next three digits?`;
+    if (len === 6) return `Okay, ${p.slice(3,6).split('').join(' ')}. And the last four?`;
+    if (len === 9) return `Almost there. What is the last number?`;
+    if (len > 0) return `I have the area code. What are the next three digits?`;
 
     return "Okay, noted. What is the best phone number to reach you at?";
   }
 
-  // ─── 3. PRIORITY: FAQ KNOWLEDGE BASE (UPDATED FOR PLATFORM) ───
-
-  // Mechanic/Vendor Inquiries (I am a mechanic looking for work)
-  if (q.includes("i am a mechanic") || q.includes("looking for work") || q.includes("get leads") || q.includes("partner") || q.includes("join network")) {
+  // ─── 3. FAQ KNOWLEDGE BASE ───
+  if (q.includes("i am a mechanic") || q.includes("looking for work") || q.includes("partner")) {
       ctx.data.userType = "mechanic";
-      return "That's great! We are always looking for trusted partners. To join our network and get free trial leads, please visit mass mechanic dot com and click 'Partner With Us' at the top of the page.";
+      return "That's great! We are looking for partners. Please visit mass mechanic dot com and click 'Partner With Us' to get free trial leads.";
+  }
+  if (q.includes("what is mass mechanic") || q.includes("who are you")) {
+    return "Mass Mechanic is a referral service. We match you with trusted local shops for free quotes. Can I help you find a mechanic today?";
+  }
+  if (q.includes("how much") || q.includes("price") || q.includes("cost")) {
+    return "Our service is 100% free for drivers. You only pay the shop if you choose to hire them. Would you like to get a free quote?";
   }
 
-  // Identity / "How it works"
-  if (q.includes("what is mass mechanic") || q.includes("who are you") || q.includes("what do you do") || q.includes("referral") || q.includes("real shop")) {
-    return "Mass Mechanic is a referral service that connects you with verified local mechanics. We don't do the repairs ourselves; instead, we match you with trusted shops in your area who will give you a free quote. Can I help you find a mechanic today?";
-  }
+  // ─── 4. BOOKING FLOW ───
 
-  // Pricing (For Drivers)
-  if (q.includes("how much") || q.includes("price") || q.includes("cost") || q.includes("fee") || q.includes("charge")) {
-    return "Our service is 100% free for drivers. You only pay the mechanic directly if you choose to hire them. Would you like to get a free quote?";
-  }
-
-  // Vetting / Trust
-  if (q.includes("verified") || q.includes("trust") || q.includes("safe") || q.includes("licensed")) {
-    return "Yes, every mechanic in our network is carefully vetted. They must be licensed, insured, and maintain high customer ratings. Can I help you find a mechanic for your car?";
-  }
-
-  // Location / Coverage
-  if (q.includes("where") || q.includes("location") || q.includes("address") || q.includes("area")) {
-    return "We serve drivers across Massachusetts, including Brockton, Fall River, and New Bedford. Since we connect you with local shops, we can help you find someone nearby. Where are you located?";
-  }
-
-  // ─── 4. BOOKING FLOW (Lead Gen) ───
-
-  // State: Greeting
+  // State: Greeting (Fork in the road)
   if (ctx.state === "greeting") {
-    if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw") || q.includes("volvo") || q.includes("jeep")) {
-      ctx.data.makeModel = text;
-      ctx.state = "collect_issue";
-      return "Got it. I can find a specialist for that vehicle. What seems to be the problem with it?";
+    // If they explicitly say they want to book/schedule
+    if (q.includes("book") || q.includes("schedule") || q.includes("repair") || q.includes("quote") || q.includes("fix") || q.includes("find")) {
+      ctx.state = "collect_zip";
+      return "Great. I can help with that. To find the closest shops to you, what is your Zip Code?";
     }
-    if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair") || q.includes("help") || q.includes("car") || q.includes("quote")) {
-      ctx.state = "collect_details";
-      return "I'd be happy to help you find a mechanic. To get started, what is the Year, Make, and Model of your car?";
+    // If they have a question
+    if (q.includes("question") || q.includes("info")) {
+        return "Sure, I can answer your questions. What would you like to know about Mass Mechanic?";
     }
+    // Default fallback if they just say "Hi"
+    return "Are you looking to find a mechanic for a repair, or do you have questions about how we work?";
   }
 
-  // State: Vehicle Details
+  // State: Collect Zip (NEW)
+  if (ctx.state === "collect_zip") {
+      // Extract any 5 digit number
+      const zipMatch = text.match(/\b\d{5}\b/) || text.match(/(\d\s*){5}/);
+      if (zipMatch) {
+          ctx.data.zip = zipMatch[0].replace(/\s/g, '');
+          ctx.state = "collect_details";
+          return "Thanks. And what is the Year, Make, and Model of your car?";
+      }
+      // If they gave a city name instead
+      if (text.length > 3) {
+          ctx.data.zip = text; // Store city as zip for now
+          ctx.state = "collect_details";
+          return "Got it. What is the Year, Make, and Model of the vehicle?";
+      }
+      return "I need a Zip Code or City to find mechanics near you. Where are you located?";
+  }
+
+  // State: Vehicle Details (With "I Have" Fix)
   if (ctx.state === "collect_details") {
+    // <--- FIX: Ignore short filler phrases
+    if (text.length < 10 && (q.includes("i have") || q.includes("it is") || q.includes("my car is"))) {
+        return null; // Don't speak, just wait for more input
+    }
+
     const isJustYear = text.match(/^(19|20)\d{2}$/) || text.match(/^(nineteen|twenty)/i);
     if (isJustYear && text.split(" ").length < 4) {
          ctx.data.makeModel = text; 
          return `Okay, ${text}. And what is the Make and Model?`;
     }
 
-    if (ctx.data.makeModel) {
-        ctx.data.makeModel += " " + text;
-    } else {
-        ctx.data.makeModel = text;
-    }
+    if (ctx.data.makeModel) ctx.data.makeModel += " " + text;
+    else ctx.data.makeModel = text;
 
     ctx.state = "collect_issue";
     return "Okay, got it. And can you tell me a little bit about what's going on with it?";
@@ -227,15 +213,14 @@ function routeIntent(text, ctx) {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
     if (text.split(" ").length < 4) {
-        return "Understood. I can match you with a shop that handles that. What's the best phone number to reach you at?";
+        return "Understood. I can match you with a shop for that. What's the best phone number to reach you at?";
     }
-    // Updated empathy script to reflect "Matching" vs "Fixing"
     return "Oof, I hear you. That sounds frustrating. I want to match you with a highly-rated mechanic who can fix that. What's the best phone number for them to contact you?";
   }
 
   if (ctx.state === "greeting") {
-      ctx.state = "collect_details";
-      return "I can help you find a trusted mechanic for free. What kind of car do you have?";
+      // Fallback if they say something weird at the start
+      return "I can help you find a trusted mechanic. Are you looking to get a quote?";
   }
 
   return "Could you repeat that? I can help you find a mechanic.";
@@ -307,6 +292,9 @@ wss.on("connection", (ws) => {
       ws._currentMsgId++; 
 
       const reply = routeIntent(transcript, ws._ctx);
+      // <--- FIX: If reply is null (ignored filler), don't speak
+      if (!reply) return; 
+
       console.log(`Bot: ${reply}`);
 
       ws._speaking = true;
@@ -326,11 +314,7 @@ wss.on("connection", (ws) => {
         }
 
         if (ws._ctx.state === "closing" && ws._currentMsgId === myMsgId) {
-           setTimeout(() => {
-             if (ws._currentMsgId === myMsgId) {
-                 ws.close(); 
-             }
-           }, 3000);
+           setTimeout(() => { if (ws._currentMsgId === myMsgId) ws.close(); }, 3000);
         }
 
       } catch (e) {
@@ -348,8 +332,8 @@ wss.on("connection", (ws) => {
     if (data.event === "start") {
       ws._streamSid = data.start.streamSid;
       console.log("Call Started");
-      // Updated Greeting for a Network/Referral Service
-      const greeting = "Hi! Thanks for calling Mass Mechanic. I can connect you with a trusted local mechanic for a free quote. How can I help?";
+      // Updated Greeting for Fork in the Road
+      const greeting = "Hi! Thanks for calling Mass Mechanic. I can match you with a trusted local shop for a free quote. Are you looking to schedule a repair, or do you have general questions?";
       (async () => {
          ws._speaking = true;
          ws._currentMsgId++;
