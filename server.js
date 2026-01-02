@@ -45,6 +45,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 // ───────────────────────────────────────────────────────────────────────────────
 // NEW: SMS AUTO-REPLY BOT (WITH MEMORY)
 // ───────────────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────
+// NEW: SMS AUTO-REPLY BOT (WITH MEMORY)
+// ───────────────────────────────────────────────────────────────────────────────
 app.post('/sms', async (req, res) => {
     const incomingMsg = req.body.Body;
     const fromNumber = req.body.From;
