@@ -172,12 +172,11 @@ function routeIntent(text, ctx) {
 
   // 4. Vehicle Details
   if (ctx.state === "collect_details") {
-    // <--- FIX: Detect if they only said a Year (like "1999" or "nineteen ninety nine")
+    // Detect if they only said a Year
     const isJustYear = text.match(/^(19|20)\d{2}$/) || text.match(/^(nineteen|twenty)/i);
     
     if (isJustYear && text.split(" ").length < 4) {
-         ctx.data.makeModel = text; // Save the year
-         // STAY in this state, don't move to issue yet
+         ctx.data.makeModel = text; 
          return `Okay, ${text}. And what is the Make and Model?`;
     }
 
@@ -190,7 +189,16 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    return "Oof, I hear you. That sounds frustrating. I want to get a pro to take a look at that ASAP. What's the best phone number to reach you at? You can start with just the area code.";
+    
+    // <--- FIX: Smart "Oof" Guard
+    // If the input is short (likely a car model arriving late like "V70"), skip the drama.
+    // Also fixed the ASAP pronunciation.
+    if (text.split(" ").length < 4) {
+        return "Understood. I'd like to have a mechanic look at that. What's the best phone number to reach you at?";
+    }
+    
+    // If answer is longer, show empathy
+    return "Oof, I hear you. That sounds frustrating. I want to get a pro to take a look at that as soon as possible. What's the best phone number to reach you at? You can start with just the area code.";
   }
 
   // Fallback
