@@ -3,6 +3,7 @@ import fetch from "node-fetch";
 import WebSocket, { WebSocketServer } from "ws";
 import { spawn } from "child_process";
 import ffmpegBin from "@ffmpeg-installer/ffmpeg";
+import twilio from "twilio"; 
 
 // ───────────────────────────────────────────────────────────────────────────────
 // 1. CONFIGURATION
@@ -13,11 +14,18 @@ const PORT = process.env.PORT || 10000;
 // API Keys
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY; 
 const DG_KEY = process.env.DEEPGRAM_API_KEY;
+const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_PHONE = process.env.TWILIO_PHONE_NUMBER; 
+const MY_PHONE = process.env.MY_PHONE_NUMBER;         
 
-if (!OPENAI_API_KEY || !DG_KEY) {
+if (!OPENAI_API_KEY || !DG_KEY || !TWILIO_SID || !TWILIO_AUTH) {
   console.error("❌ Missing API Keys. Check your .env file.");
   process.exit(1);
 }
+
+// Initialize Twilio Client
+const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH);
 
 // ───────────────────────────────────────────────────────────────────────────────
 // 2. CONVERSATION BRAIN
@@ -29,6 +37,7 @@ class ConversationContext {
       name: null,
       zip: null,
       phone: "",       
+      callerId: "",
       makeModel: null, 
       issue: null,     
       message: "",      
@@ -38,8 +47,20 @@ class ConversationContext {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 3. UTILITIES
+// 3. UTILITIES (SMS & Phone Extraction)
 // ───────────────────────────────────────────────────────────────────────────────
+
+// NEW: Function to send SMS (Fire & Forget)
+function sendSms(to, body) {
+    // We do NOT 'await' this. We let it run in the background.
+    twilioClient.messages.create({
+        body: body,
+        from: TWILIO_PHONE,
+        to: to
+    }).then(msg => console.log(`✅ SMS sent to ${to}`))
+      .catch(err => console.error(`❌ SMS Failed: ${err.message}`));
+}
+
 const NUMBER_WORDS_MAP = {
   'zero': '0', 'oh': '0', 'o': '0', 'one': '1', 'won': '1',
   'two': '2', 'to': '2', 'too': '2', 'three': '3', 'tree': '3',
@@ -88,9 +109,9 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // ─── SPECIAL: Manager Flow ───
+  // ─── MANAGER FLOW ───
   if (ctx.state === "confirm_manager") {
-      if (q.includes("yes") || q.includes("yeah") || q.includes("sure") || q.includes("please") || q.includes("do that")) {
+      if (q.includes("yes") || q.includes("yeah") || q.includes("sure") || q.includes("please")) {
           ctx.state = "take_message";
           return "Great. Leave your message with me and I'll text a team member about your concern. What would you like me to tell them?";
       }
@@ -103,14 +124,14 @@ function routeIntent(text, ctx) {
       return "Would you like me to connect you with a member of our team?";
   }
 
-  // ─── 1. Phone Confirmation ───
+  // ─── BOOKING & PHONE LOGIC ───
   if (ctx.state === "confirm_phone") {
-      if (q.includes("no") || q.includes("wrong") || q.includes("incorrect") || q.includes("wait")) {
+      if (q.includes("no") || q.includes("wrong") || q.includes("wait")) {
           ctx.data.phone = "";
           ctx.state = "collect_phone";
-          return "No problem. Let's try again. What is your phone number? You can start with just the area code.";
+          return "No problem. Let's try again. What is your phone number?";
       }
-      if (q.includes("yes") || q.includes("correct") || q.includes("right") || q.includes("yeah") || q.includes("yep")) {
+      if (q.includes("yes") || q.includes("correct") || q.includes("right") || q.includes("yeah")) {
           ctx.state = "closing";
           return "Perfect. I've sent your request to our network. A verified local shop will contact you shortly with a quote. Thanks for choosing Mass Mechanic! Bye now.";
       }
@@ -120,58 +141,47 @@ function routeIntent(text, ctx) {
       return `Just want to be sure. Is it ${formatted}?`;
   }
 
-  // ─── 2. Phone Collection ───
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
-    if (extracted) {
-        if (ctx.data.phone.length > 0 || extracted.length >= 3) ctx.data.phone += extracted;
-    }
+    if (extracted && (ctx.data.phone.length > 0 || extracted.length >= 3)) ctx.data.phone += extracted;
+    
     const len = ctx.data.phone.length;
-    const p = ctx.data.phone;
-
     if (len >= 10) {
       ctx.state = "confirm_phone"; 
-      const clean = p.slice(0, 10);
-      const formatted = `${clean[0]} ${clean[1]} ${clean[2]}... ${clean[3]} ${clean[4]} ${clean[5]}... ${clean[6]} ${clean[7]} ${clean[8]} ${clean[9]}`;
+      const p = ctx.data.phone.slice(0, 10);
+      const formatted = `${p[0]} ${p[1]} ${p[2]}... ${p[3]} ${p[4]} ${p[5]}... ${p[6]} ${p[7]} ${p[8]} ${p[9]}`;
       return `Okay, I have ${formatted}. Is that correct?`;
     }
-    if (len === 3) return `Got it, area code ${p.split('').join(' ')}. What are the next three digits?`;
-    if (len === 6) return `Okay, ${p.slice(3,6).split('').join(' ')}. And the last four?`;
-    if (len === 9) return `Almost there. What is the last number?`;
-    if (len > 0) return `I have the area code. What are the next three digits?`;
-
+    if (len > 0) return `I have ${len} digits so far. What comes next?`;
     return "Okay, noted. What is the best phone number to reach you at?";
   }
 
-  // ─── 3. FAQ KNOWLEDGE BASE ───
+  // ─── FAQ ───
   if (q.includes("i am a mechanic") || q.includes("looking for work") || q.includes("partner")) {
       ctx.data.userType = "mechanic";
-      return "That's great! We are looking for partners. Please visit mass mechanic dot com and click 'Partner With Us' to get free trial leads.";
+      return "That's great! We are looking for partners. Please visit mass mechanic dot com and click 'Partner With Us'.";
   }
   if (q.includes("what is mass mechanic") || q.includes("who are you")) {
     return "Mass Mechanic is a referral service. We match you with trusted local shops for free quotes. Can I help you find a mechanic today?";
   }
   if (q.includes("how much") || q.includes("price") || q.includes("cost")) {
-    return "Our service is 100% free for drivers. You only pay the shop if you choose to hire them. Would you like to get a free quote?";
+    return "Our service is 100% free for drivers. You only pay the shop if you choose to hire them.";
   }
 
-  // ─── 4. BOOKING FLOW ───
-
+  // ─── BOOKING FLOW ───
   if (ctx.state === "greeting") {
-    if (q.includes("book") || q.includes("schedule") || q.includes("repair") || q.includes("quote") || q.includes("fix") || q.includes("find")) {
+    if (q.includes("book") || q.includes("schedule") || q.includes("repair") || q.includes("quote") || q.includes("fix")) {
       ctx.state = "collect_zip";
       return "Great. I can help with that. To find the closest shops to you, what is your Zip Code?";
     }
-    if (q.includes("question") || q.includes("info")) {
-        return "Sure, I can answer your questions. What would you like to know about Mass Mechanic?";
-    }
+    if (q.includes("question") || q.includes("info")) return "Sure, I can answer your questions. What would you like to know?";
     return "Are you looking to find a mechanic for a repair, or do you have questions about how we work?";
   }
 
   if (ctx.state === "collect_zip") {
-      const zipMatch = text.match(/\b\d{5}\b/) || text.match(/(\d\s*){5}/);
+      const zipMatch = text.match(/\b\d{5}\b/);
       if (zipMatch) {
-          ctx.data.zip = zipMatch[0].replace(/\s/g, '');
+          ctx.data.zip = zipMatch[0];
           ctx.state = "collect_details";
           return "Thanks. And what is the Year, Make, and Model of your car?";
       }
@@ -184,16 +194,13 @@ function routeIntent(text, ctx) {
   }
 
   if (ctx.state === "collect_details") {
-    if (text.length < 10 && (q.includes("i have") || q.includes("it is") || q.includes("my car is"))) {
-        return null; 
-    }
-
+    if (text.length < 10 && (q.includes("i have") || q.includes("it is"))) return null; 
+    
     const isJustYear = text.match(/^(19|20)\d{2}$/) || text.match(/^(nineteen|twenty)/i);
     if (isJustYear && text.split(" ").length < 4) {
          ctx.data.makeModel = text; 
          return `Okay, ${text}. And what is the Make and Model?`;
     }
-
     if (ctx.data.makeModel) ctx.data.makeModel += " " + text;
     else ctx.data.makeModel = text;
 
@@ -204,21 +211,16 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    if (text.split(" ").length < 4) {
-        return "Understood. I can match you with a shop for that. What's the best phone number to reach you at?";
-    }
-    return "Oof, I hear you. That sounds frustrating. I want to match you with a highly-rated mechanic who can fix that. What's the best phone number for them to contact you?";
+    if (text.split(" ").length < 4) return "Understood. I can match you with a shop for that. What's the best phone number to reach you at?";
+    return "Oof, I hear you. That sounds frustrating. I want to match you with a mechanic who can fix that. What's the best phone number for them to contact you?";
   }
 
-  if (ctx.state === "greeting") {
-      return "I can help you find a trusted mechanic. Are you looking to get a quote?";
-  }
-
-  return "Could you repeat that? I can help you find a mechanic.";
+  if (ctx.state === "greeting") return "I can help you find a trusted mechanic. Are you looking to get a quote?";
+  return "Could you repeat that?";
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 5. AUDIO PIPELINE UTILS
+// 5. AUDIO PIPELINE
 // ───────────────────────────────────────────────────────────────────────────────
 async function ttsToMulaw(text) { 
   const url = "https://api.openai.com/v1/audio/speech";
@@ -228,23 +230,12 @@ async function ttsToMulaw(text) {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ 
-      model: "tts-1", 
-      voice: "shimmer", 
-      input: text, 
-      response_format: "pcm" 
-    }),
+    body: JSON.stringify({ model: "tts-1", voice: "shimmer", input: text, response_format: "pcm" }),
   });
-
   if (!res.ok) throw new Error(`OpenAI Error: ${res.statusText}`);
   const inputBuffer = Buffer.from(await res.arrayBuffer());
-
   return new Promise((resolve, reject) => {
-    const ff = spawn(ffmpegBin.path, [
-      "-hide_banner", "-nostdin", "-loglevel", "error",
-      "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "pipe:0",
-      "-f", "mulaw", "-ar", "8000", "-ac", "1", "pipe:1"
-    ]);
+    const ff = spawn(ffmpegBin.path, ["-hide_banner", "-nostdin", "-loglevel", "error", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "pipe:0", "-f", "mulaw", "-ar", "8000", "-ac", "1", "pipe:1"]);
     const chunks = [];
     ff.stdout.on("data", c => chunks.push(c));
     ff.on("close", () => resolve(Buffer.concat(chunks)));
@@ -257,11 +248,9 @@ async function speakResponse(ws, text) {
     ws._speaking = true;
     const myMsgId = ++ws._currentMsgId;
     console.log(`Bot: ${text}`);
-
     try {
         const audio = await ttsToMulaw(text);
         if (ws._currentMsgId !== myMsgId) return; 
-
         const FRAME_SIZE = 160; 
         for (let i = 0; i < audio.length; i += FRAME_SIZE) {
             if (ws._currentMsgId !== myMsgId || ws.readyState !== ws.OPEN) break;
@@ -269,18 +258,11 @@ async function speakResponse(ws, text) {
             ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: frame } }));
             await new Promise(r => setTimeout(r, 20));
         }
-
         if (ws._ctx.state === "closing" && ws._currentMsgId === myMsgId) {
            setTimeout(() => { if (ws._currentMsgId === myMsgId) ws.close(); }, 3000);
         }
-
-    } catch (e) {
-        console.error(e);
-    } finally {
-        if (ws._currentMsgId === myMsgId) {
-            ws._speaking = false;
-        }
-    }
+    } catch (e) { console.error(e); } 
+    finally { if (ws._currentMsgId === myMsgId) ws._speaking = false; }
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -304,28 +286,36 @@ wss.on("connection", (ws) => {
     if (msg.is_final && msg.channel?.alternatives?.[0]?.transcript) {
       const transcript = msg.channel.alternatives[0].transcript;
       if (!transcript.trim()) return;
-      
       console.log(`User: ${transcript}`);
 
-      if (ws._ctx.state === "closing") {
-          console.log("Ignored input (Closing state active)");
-          return;
-      }
+      if (ws._ctx.state === "closing") return; 
       
-      // <--- CHANGED: Logic for message taking buffering
+      // ─── VOICEMAIL LOGIC ───
       if (ws._ctx.state === "take_message") {
           ws._ctx.data.message += " " + transcript;
           
+          // <--- NEW: Show the message building in the logs
+          console.log(`📝 Buffer: "${ws._ctx.data.message.trim()}"`);
+
           if (ws._messageTimer) clearTimeout(ws._messageTimer);
           
-          // <--- INCREASED: Wait 6 seconds (6000ms) for silence
           ws._messageTimer = setTimeout(() => {
               console.log("Message recording finished.");
               ws._ctx.state = "closing"; 
+              
+              // <--- FIRE AND FORGET SMS (No await)
+              const contactInfo = ws._ctx.data.phone || ws._ctx.data.callerId || "Unknown Caller";
+              const note = `📞 Voicemail from ${contactInfo}:\n\n"${ws._ctx.data.message.trim()}"`;
+              if (MY_PHONE) sendSms(MY_PHONE, note);
+
+              // Send confirmation to caller
+              if (ws._ctx.data.callerId) {
+                  sendSms(ws._ctx.data.callerId, "Thanks for calling Mass Mechanic. We received your message and will get back to you shortly!");
+              }
+
               const reply = "Thanks. I've sent that text to them immediately. They should get back to you soon. Thanks for calling Mass Mechanic! Bye now.";
               speakResponse(ws, reply);
-          }, 6000);
-          
+          }, 6000); 
           return; 
       }
       
@@ -336,7 +326,6 @@ wss.on("connection", (ws) => {
       
       const reply = routeIntent(transcript, ws._ctx);
       if (!reply) return; 
-
       speakResponse(ws, reply);
     }
   });
@@ -346,6 +335,12 @@ wss.on("connection", (ws) => {
     if (data.event === "start") {
       ws._streamSid = data.start.streamSid;
       console.log("Call Started");
+      
+      if (data.start.customParameters && data.start.customParameters.callerNumber) {
+          ws._ctx.data.callerId = data.start.customParameters.callerNumber;
+          console.log("📞 Caller ID Captured:", ws._ctx.data.callerId);
+      }
+
       const greeting = "Hi! Thanks for calling Mass Mechanic. I can connect you with a trusted local mechanic for a free quote. Are you looking to schedule a repair, or do you have general questions?";
       speakResponse(ws, greeting);
     }
