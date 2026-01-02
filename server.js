@@ -80,33 +80,42 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // 1. Phone Collection (Guided Chunking)
+  // 1. Phone Collection (With Smart Retry)
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
+    
+    // If we extracted numbers, append them
     if (extracted) {
       ctx.data.phone += extracted;
-      const len = ctx.data.phone.length;
-
-      // Smart "Next Step" Prompts
-      if (len === 3) {
-         return `Got it, ${ctx.data.phone.split('').join(' ')}. What are the next three?`;
-      }
-      if (len === 6) {
-         const last3 = ctx.data.phone.slice(3, 6).split('').join(' ');
-         return `Okay, ${last3}. And the last four?`;
-      }
-      if (len >= 10) {
-        ctx.state = "closing";
-        // Trim to 10 if they gave too many
-        const p = ctx.data.phone.slice(0, 10);
-        const formatted = `${p[0]} ${p[1]} ${p[2]}, ${p[3]} ${p[4]} ${p[5]}, ${p[6]} ${p[7]} ${p[8]} ${p[9]}`;
-        return `Perfect. I have ${formatted}. A mechanic will call you shortly to confirm. Thanks for choosing Mass Mechanic!`;
-      }
-      
-      return `I have ${len} digits so far. What comes next?`;
     }
     
-    return "I didn't catch that number. Could you start with just the area code?";
+    const len = ctx.data.phone.length;
+
+    // SCENARIO: We have extracted something (or already had digits), check status
+    if (len === 3) {
+       return `Got it, ${ctx.data.phone.split('').join(' ')}. What are the next three digits?`;
+    }
+    if (len === 6) {
+       const last3 = ctx.data.phone.slice(3, 6).split('').join(' ');
+       return `Okay, ${last3}. And the last four?`;
+    }
+    if (len >= 10) {
+      ctx.state = "closing";
+      const p = ctx.data.phone.slice(0, 10);
+      const formatted = `${p[0]} ${p[1]} ${p[2]}, ${p[3]} ${p[4]} ${p[5]}, ${p[6]} ${p[7]} ${p[8]} ${p[9]}`;
+      return `Perfect. I have ${formatted}. I'll have one of our mechanics call you shortly to confirm the details. Thanks for calling Mass Mechanic!`;
+    }
+    
+    // SCENARIO: Logic when we didn't hear new digits, but we HAVE some already
+    if (!extracted && len > 0) {
+       // Don't reset! Just repeat the last prompt based on how many we have.
+       if (len < 3) return `I have ${ctx.data.phone.split('').join(' ')} so far. What is the rest of the area code?`;
+       if (len < 6) return `I have the area code. What are the next three digits?`;
+       return `I'm almost done, just need the last four digits.`;
+    }
+
+    // SCENARIO: We have nothing at all
+    return "I didn't quite catch that. Could you start with just the area code of your phone number?";
   }
 
   // 2. Global Commands
@@ -119,10 +128,11 @@ function routeIntent(text, ctx) {
 
   // 3. Greeting State
   if (ctx.state === "greeting") {
-    if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw") || q.includes("volvo")) {
+    if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw") || q.includes("volvo") || q.includes("jeep")) {
       ctx.data.makeModel = text;
       ctx.state = "collect_issue";
-      return "Got it. What seems to be the problem with the vehicle?";
+      // Added Empathy
+      return "Got it. I can definitely help get that checked out. What seems to be the problem with the vehicle?";
     }
     if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair") || q.includes("help") || q.includes("car")) {
       ctx.state = "collect_details";
@@ -134,14 +144,16 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_details") {
     ctx.data.makeModel = text; 
     ctx.state = "collect_issue";
-    return "Okay. And what seems to be the problem with the vehicle?";
+    // Added Empathy
+    return "Okay, thanks. And what seems to be the main issue you're having with it?";
   }
 
   // 5. Issue Details -> Start Phone Collection
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    return "Understood. I'd like to have a mechanic call you back. What's your phone number? You can start with just the area code.";
+    // Added Empathy/Urgency
+    return "Oof, that doesn't sound good. I want to get a mechanic to look at that as soon as possible. What's the best phone number to reach you at? You can start with just the area code.";
   }
 
   // Fallback
@@ -166,7 +178,7 @@ async function ttsToMulaw(text) {
     },
     body: JSON.stringify({ 
       model: "tts-1", 
-      voice: "shimmer", // <--- CHANGED: "shimmer" is often clearer/brighter than alloy
+      voice: "shimmer", 
       input: text, 
       response_format: "pcm" 
     }),
@@ -211,7 +223,7 @@ wss.on("connection", (ws) => {
       
       console.log(`User: ${transcript}`);
       
-      // <--- BARGE-IN FIX: If user speaks, STOP the bot's current audio immediately
+      // Barge-in
       if (ws._speaking) {
          console.log("!! Barge-in detected: Clearing audio !!");
          ws.send(JSON.stringify({ event: "clear", streamSid: ws._streamSid }));
