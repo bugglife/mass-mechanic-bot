@@ -51,12 +51,21 @@ function extractPhoneNumber(text) {
   let digits = '';
   const words = q.split(/\s+/);
   
+  // Standard regex match (e.g. "617-555-1234")
   const match = q.match(/(\d{3})[\s.-]?(\d{3})[\s.-]?(\d{4})/);
   if (match) return match[0].replace(/\D/g, '');
 
   let i = 0;
   while (i < words.length) {
     const word = words[i];
+    
+    // <--- FIX: Handle "Two Hundred" -> 200
+    if (word === 'hundred') {
+        digits += "00";
+        i++; continue;
+    }
+
+    // Handle "double 5"
     if (word === 'double' && i + 1 < words.length) {
       const nextDigit = NUMBER_WORDS_MAP[words[i + 1]];
       if (nextDigit && nextDigit.length === 1) {
@@ -64,6 +73,8 @@ function extractPhoneNumber(text) {
         i += 2; continue;
       }
     }
+    
+    // Standard words
     if (NUMBER_WORDS_MAP[word] && NUMBER_WORDS_MAP[word].length === 1) {
       digits += NUMBER_WORDS_MAP[word];
     } else if (/^\d+$/.test(word)) {
@@ -88,32 +99,38 @@ function routeIntent(text, ctx) {
     }
     
     const len = ctx.data.phone.length;
+    const p = ctx.data.phone;
 
-    // Smart prompts based on count
+    // --- SCENARIO A: Moving forward ---
     if (len === 3) {
-       return `Got it, ${ctx.data.phone.split('').join(' ')}. What are the next three?`;
+       // Added "Human" padding
+       return `Got it, area code ${p.split('').join(' ')}. What are the next three digits?`;
     }
     if (len === 6) {
-       const last3 = ctx.data.phone.slice(3, 6).split('').join(' ');
-       return `Okay, ${last3}. And the last four?`;
+       const last3 = p.slice(3, 6).split('').join(' ');
+       return `Okay, ${last3}. I'm ready for the last four whenever you are.`;
     }
     if (len === 9) {
-       // <--- FIX: Smart handling for the 9-digit awkwardness
-       return `Almost there. Just one digit left. What is the last number?`;
+       return `Almost got it. Just one digit left. What is the last number?`;
     }
     if (len >= 10) {
-      ctx.state = "closing"; // Signal that we are done
-      const p = ctx.data.phone.slice(0, 10);
-      const formatted = `${p[0]} ${p[1]} ${p[2]}, ${p[3]} ${p[4]} ${p[5]}, ${p[6]} ${p[7]} ${p[8]} ${p[9]}`;
-      return `Perfect. I have ${formatted}. I'll have one of our mechanics call you shortly to confirm. Thanks for calling Mass Mechanic!`;
+      ctx.state = "closing"; 
+      // Trim to 10
+      const clean = p.slice(0, 10);
+      const formatted = `${clean[0]}${clean[1]}${clean[2]}... ${clean[3]}${clean[4]}${clean[5]}... ${clean[6]}${clean[7]}${clean[8]}${clean[9]}`;
+      return `Perfect, I have ${formatted}. I'll have a senior mechanic call you shortly to confirm the details. Thanks for calling Mass Mechanic!`;
     }
     
-    if (!extracted && len > 0) {
-       if (len < 3) return `I have the area code ${ctx.data.phone.split('').join(' ')}. What comes next?`;
-       return `I have ${len} digits so far. What are the rest?`;
+    // --- SCENARIO B: We have partial data, but user said something we didn't catch ---
+    // <--- FIX: This block ensures we NEVER reset to "Start over" if we have digits
+    if (len > 0) {
+       if (len < 3) return `I have ${p.split('').join(' ')} so far. What is the rest of the area code?`;
+       if (len < 6) return `I have the area code. What are the next three digits?`;
+       return `Sorry, I missed that last part. I have ${len} digits so far. What are the last few?`;
     }
 
-    return "I didn't quite catch that. Could you start with just the area code?";
+    // --- SCENARIO C: We truly have nothing ---
+    return "I didn't quite catch that. Could you start with just the area code? For example, 6 1 7.";
   }
 
   // 2. Global Commands
@@ -133,7 +150,8 @@ function routeIntent(text, ctx) {
     }
     if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair") || q.includes("help") || q.includes("car")) {
       ctx.state = "collect_details";
-      return "I can help with that. What is the Year, Make, and Model of your vehicle?";
+      // Warmer phrasing
+      return "I'd be happy to help you with that. To get started, what is the Year, Make, and Model of your car?";
     }
   }
 
@@ -141,14 +159,15 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_details") {
     ctx.data.makeModel = text; 
     ctx.state = "collect_issue";
-    return "Okay, thanks. And what seems to be the main issue you're having with it?";
+    return "Okay, got it. And can you tell me a little bit about what's going on with it?";
   }
 
   // 5. Issue Details -> Start Phone Collection
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    return "Oof, that doesn't sound good. I want to get a mechanic to look at that as soon as possible. What's the best phone number to reach you at? You can start with just the area code.";
+    // More empathy
+    return "Oof, I hear you. That sounds frustrating. I want to get a pro to take a look at that ASAP. What's the best phone number to reach you at? You can start with just the area code.";
   }
 
   // Fallback
@@ -237,13 +256,11 @@ wss.on("connection", (ws) => {
           await new Promise(r => setTimeout(r, 20));
         }
 
-        // <--- FIX: Graceful Hangup
-        // If the conversation is over, wait 3 seconds (so they hear the goodbye) then hang up
         if (ws._ctx.state === "closing") {
            console.log("Conversation complete. Hanging up in 3s...");
            setTimeout(() => {
              console.log("Closing socket.");
-             ws.close(); // This tells Twilio the call is done
+             ws.close(); 
            }, 3000);
         }
 
