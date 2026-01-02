@@ -10,13 +10,9 @@ import ffmpegBin from "@ffmpeg-installer/ffmpeg";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// API Keys - Ensure these are in your .env file
+// API Keys
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY; 
 const DG_KEY = process.env.DEEPGRAM_API_KEY;
-
-// Audio Configuration
-const MEDIA_FORMAT = "pcm16"; // Keep this simple for now
-const SAMPLE_RATE = 8000; // Phone standard
 
 if (!OPENAI_API_KEY || !DG_KEY) {
   console.error("❌ Missing API Keys. Check your .env file.");
@@ -24,16 +20,16 @@ if (!OPENAI_API_KEY || !DG_KEY) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 2. CONVERSATION BRAIN (The "State Machine")
+// 2. CONVERSATION BRAIN
 // ───────────────────────────────────────────────────────────────────────────────
 class ConversationContext {
   constructor() {
-    this.state = "greeting"; // Initial state
+    this.state = "greeting"; 
     this.data = {
       name: null,
-      phone: "",       // To store the caller's number
-      makeModel: null, // e.g., "Ford F-150"
-      issue: null,     // e.g., "Brakes squeaking"
+      phone: "",       
+      makeModel: null, 
+      issue: null,     
       appointment: null
     };
   }
@@ -42,7 +38,6 @@ class ConversationContext {
 // ───────────────────────────────────────────────────────────────────────────────
 // 3. UTILITIES (Phone Number Extraction)
 // ───────────────────────────────────────────────────────────────────────────────
-// This is the "Smart" number extractor from File 2
 const NUMBER_WORDS_MAP = {
   'zero': '0', 'oh': '0', 'o': '0', 'one': '1', 'won': '1',
   'two': '2', 'to': '2', 'too': '2', 'three': '3', 'tree': '3',
@@ -56,15 +51,12 @@ function extractPhoneNumber(text) {
   let digits = '';
   const words = q.split(/\s+/);
   
-  // Basic regex check first
   const match = q.match(/(\d{3})[\s.-]?(\d{3})[\s.-]?(\d{4})/);
   if (match) return match[0].replace(/\D/g, '');
 
   let i = 0;
   while (i < words.length) {
     const word = words[i];
-    
-    // Handle "double 5" -> 55
     if (word === 'double' && i + 1 < words.length) {
       const nextDigit = NUMBER_WORDS_MAP[words[i + 1]];
       if (nextDigit && nextDigit.length === 1) {
@@ -72,7 +64,6 @@ function extractPhoneNumber(text) {
         i += 2; continue;
       }
     }
-    
     if (NUMBER_WORDS_MAP[word] && NUMBER_WORDS_MAP[word].length === 1) {
       digits += NUMBER_WORDS_MAP[word];
     } else if (/^\d+$/.test(word)) {
@@ -89,13 +80,11 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // 1. Phone Collection State (Priority)
+  // 1. Phone Collection
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
     if (extracted) {
-      // Logic to accumulate digits if they pause
       ctx.data.phone += extracted;
-      
       if (ctx.data.phone.length >= 10) {
         ctx.state = "closing";
         return `Got it. I have ${ctx.data.phone.split('').join(' ')}. A mechanic will call you back shortly. Thanks for calling Mass Mechanic!`;
@@ -103,13 +92,12 @@ function routeIntent(text, ctx) {
         return `I have ${ctx.data.phone.length} digits so far. What are the last ${10 - ctx.data.phone.length}?`;
       }
     }
-    // Fallback if they didn't say numbers
     return "I didn't catch that number. Could you say the digits one at a time?";
   }
 
-  // 2. Greeting / General Questions
+  // 2. Greeting
   if (ctx.state === "greeting") {
-    if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken")) {
+    if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair")) {
       ctx.state = "collect_details";
       return "I can help with that. What is the Year, Make, and Model of your vehicle?";
     }
@@ -120,26 +108,25 @@ function routeIntent(text, ctx) {
 
   // 3. Vehicle Details
   if (ctx.state === "collect_details") {
-    ctx.data.makeModel = text; // Save whatever they said
+    ctx.data.makeModel = text; 
     ctx.state = "collect_issue";
     return "Okay. And what seems to be the problem with the vehicle?";
   }
 
-  // 4. Issue Details -> Move to Phone
+  // 4. Issue Details
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
     return "Understood. I'd like to have a mechanic look at this request. What is the best phone number to reach you at?";
   }
 
-  // Default Fallback
   return "I can help you schedule a repair. What kind of car do you have?";
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 5. AUDIO PIPELINE (OpenAI TTS + FFmpeg)
+// 5. AUDIO PIPELINE (OpenAI TTS + FFmpeg MULAW Conversion)
 // ───────────────────────────────────────────────────────────────────────────────
-async function ttsToPcm16(text) {
+async function ttsToMulaw(text) { // <--- FIX: Renamed function
   const url = "https://api.openai.com/v1/audio/speech";
   const res = await fetch(url, {
     method: "POST",
@@ -149,7 +136,7 @@ async function ttsToPcm16(text) {
     },
     body: JSON.stringify({ 
       model: "tts-1", 
-      voice: "onyx", // "onyx" is a good, deep male voice for a mechanic shop
+      voice: "onyx", 
       input: text, 
       response_format: "pcm" 
     }),
@@ -158,12 +145,12 @@ async function ttsToPcm16(text) {
   if (!res.ok) throw new Error(`OpenAI Error: ${res.statusText}`);
   const inputBuffer = Buffer.from(await res.arrayBuffer());
 
-  // Convert 24k -> 8k using FFmpeg
+  // Convert 24k PCM -> 8k MULAW (Phone Standard)
   return new Promise((resolve, reject) => {
     const ff = spawn(ffmpegBin.path, [
       "-hide_banner", "-nostdin", "-loglevel", "error",
-      "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "pipe:0", // Input
-      "-f", "s16le", "-ar", "8000", "-ac", "1", "pipe:1"         // Output
+      "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "pipe:0", // Input: OpenAI PCM
+      "-f", "mulaw", "-ar", "8000", "-ac", "1", "pipe:1"         // <--- FIX: Output: mulaw
     ]);
     const chunks = [];
     ff.stdout.on("data", c => chunks.push(c));
@@ -174,17 +161,17 @@ async function ttsToPcm16(text) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 6. SERVER SETUP (WebSocket + Deepgram)
+// 6. SERVER SETUP
 // ───────────────────────────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ noServer: true });
 
 wss.on("connection", (ws) => {
   console.log("🔗 Call Connected");
-  ws._ctx = new ConversationContext(); // Give this call a "brain"
+  ws._ctx = new ConversationContext();
   ws._speaking = false;
 
-  // Setup Deepgram STT
-  const dg = new WebSocket(`wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=8000&channels=1&endpointing=true`, {
+  // <--- FIX: Changed encoding to 'mulaw' so we don't need to convert inbound audio
+  const dg = new WebSocket(`wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&endpointing=true`, {
     headers: { Authorization: `Token ${DG_KEY}` }
   });
 
@@ -195,20 +182,17 @@ wss.on("connection", (ws) => {
       if (!transcript.trim()) return;
       
       console.log(`User: ${transcript}`);
-      
-      // Prevent bot from talking over itself
       if (ws._speaking) return; 
 
       const reply = routeIntent(transcript, ws._ctx);
       console.log(`Bot: ${reply}`);
 
-      // Stream Audio Back
       ws._speaking = true;
       try {
-        const audio = await ttsToPcm16(reply);
+        const audio = await ttsToMulaw(reply); // <--- FIX: Using mulaw function
         
-        // Send to Twilio in 20ms chunks
-        const FRAME_SIZE = 320; // 20ms @ 8khz
+        // Send to Twilio (Mulaw frames are 160 bytes for 20ms)
+        const FRAME_SIZE = 160; 
         for (let i = 0; i < audio.length; i += FRAME_SIZE) {
           if (ws.readyState !== ws.OPEN) break;
           const frame = audio.slice(i, i + FRAME_SIZE).toString("base64");
@@ -231,16 +215,14 @@ wss.on("connection", (ws) => {
     const data = JSON.parse(msg);
     if (data.event === "start") {
       ws._streamSid = data.start.streamSid;
-      console.log("Call Started. Stream SID:", ws._streamSid);
+      console.log("Call Started");
       
-      // Initial Greeting
       const greeting = "Thanks for calling Mass Mechanic. I can help you schedule a repair or answer questions. How can I help?";
       
-      // Reuse the TTS logic for greeting
       (async () => {
          ws._speaking = true;
-         const audio = await ttsToPcm16(greeting);
-         const FRAME_SIZE = 320;
+         const audio = await ttsToMulaw(greeting); // <--- FIX: Using mulaw function
+         const FRAME_SIZE = 160;
          for (let i = 0; i < audio.length; i += FRAME_SIZE) {
            if (ws.readyState !== ws.OPEN) break;
            ws.send(JSON.stringify({ 
@@ -252,7 +234,7 @@ wss.on("connection", (ws) => {
       })();
     }
     if (data.event === "media" && dg.readyState === dg.OPEN) {
-      // Send audio from phone to Deepgram
+      // Pass the raw Mulaw audio from Twilio directly to Deepgram
       const payload = Buffer.from(data.media.payload, "base64");
       dg.send(payload);
     }
