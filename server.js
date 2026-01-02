@@ -80,42 +80,40 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // 1. Phone Collection (With Smart Retry)
+  // 1. Phone Collection
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
-    
-    // If we extracted numbers, append them
     if (extracted) {
       ctx.data.phone += extracted;
     }
     
     const len = ctx.data.phone.length;
 
-    // SCENARIO: We have extracted something (or already had digits), check status
+    // Smart prompts based on count
     if (len === 3) {
-       return `Got it, ${ctx.data.phone.split('').join(' ')}. What are the next three digits?`;
+       return `Got it, ${ctx.data.phone.split('').join(' ')}. What are the next three?`;
     }
     if (len === 6) {
        const last3 = ctx.data.phone.slice(3, 6).split('').join(' ');
        return `Okay, ${last3}. And the last four?`;
     }
+    if (len === 9) {
+       // <--- FIX: Smart handling for the 9-digit awkwardness
+       return `Almost there. Just one digit left. What is the last number?`;
+    }
     if (len >= 10) {
-      ctx.state = "closing";
+      ctx.state = "closing"; // Signal that we are done
       const p = ctx.data.phone.slice(0, 10);
       const formatted = `${p[0]} ${p[1]} ${p[2]}, ${p[3]} ${p[4]} ${p[5]}, ${p[6]} ${p[7]} ${p[8]} ${p[9]}`;
-      return `Perfect. I have ${formatted}. I'll have one of our mechanics call you shortly to confirm the details. Thanks for calling Mass Mechanic!`;
+      return `Perfect. I have ${formatted}. I'll have one of our mechanics call you shortly to confirm. Thanks for calling Mass Mechanic!`;
     }
     
-    // SCENARIO: Logic when we didn't hear new digits, but we HAVE some already
     if (!extracted && len > 0) {
-       // Don't reset! Just repeat the last prompt based on how many we have.
-       if (len < 3) return `I have ${ctx.data.phone.split('').join(' ')} so far. What is the rest of the area code?`;
-       if (len < 6) return `I have the area code. What are the next three digits?`;
-       return `I'm almost done, just need the last four digits.`;
+       if (len < 3) return `I have the area code ${ctx.data.phone.split('').join(' ')}. What comes next?`;
+       return `I have ${len} digits so far. What are the rest?`;
     }
 
-    // SCENARIO: We have nothing at all
-    return "I didn't quite catch that. Could you start with just the area code of your phone number?";
+    return "I didn't quite catch that. Could you start with just the area code?";
   }
 
   // 2. Global Commands
@@ -131,7 +129,6 @@ function routeIntent(text, ctx) {
     if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw") || q.includes("volvo") || q.includes("jeep")) {
       ctx.data.makeModel = text;
       ctx.state = "collect_issue";
-      // Added Empathy
       return "Got it. I can definitely help get that checked out. What seems to be the problem with the vehicle?";
     }
     if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair") || q.includes("help") || q.includes("car")) {
@@ -144,7 +141,6 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_details") {
     ctx.data.makeModel = text; 
     ctx.state = "collect_issue";
-    // Added Empathy
     return "Okay, thanks. And what seems to be the main issue you're having with it?";
   }
 
@@ -152,7 +148,6 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    // Added Empathy/Urgency
     return "Oof, that doesn't sound good. I want to get a mechanic to look at that as soon as possible. What's the best phone number to reach you at? You can start with just the area code.";
   }
 
@@ -166,7 +161,7 @@ function routeIntent(text, ctx) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 5. AUDIO PIPELINE (OpenAI TTS + FFmpeg MULAW)
+// 5. AUDIO PIPELINE
 // ───────────────────────────────────────────────────────────────────────────────
 async function ttsToMulaw(text) { 
   const url = "https://api.openai.com/v1/audio/speech";
@@ -223,9 +218,8 @@ wss.on("connection", (ws) => {
       
       console.log(`User: ${transcript}`);
       
-      // Barge-in
       if (ws._speaking) {
-         console.log("!! Barge-in detected: Clearing audio !!");
+         console.log("!! Barge-in: Clearing audio !!");
          ws.send(JSON.stringify({ event: "clear", streamSid: ws._streamSid }));
       }
 
@@ -242,6 +236,17 @@ wss.on("connection", (ws) => {
           ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: frame } }));
           await new Promise(r => setTimeout(r, 20));
         }
+
+        // <--- FIX: Graceful Hangup
+        // If the conversation is over, wait 3 seconds (so they hear the goodbye) then hang up
+        if (ws._ctx.state === "closing") {
+           console.log("Conversation complete. Hanging up in 3s...");
+           setTimeout(() => {
+             console.log("Closing socket.");
+             ws.close(); // This tells Twilio the call is done
+           }, 3000);
+        }
+
       } catch (e) {
         console.error(e);
       } finally {
