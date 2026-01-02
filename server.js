@@ -80,7 +80,7 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // 1. Phone Collection
+  // 1. Phone Collection (Highest Priority)
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
     if (extracted) {
@@ -95,38 +95,57 @@ function routeIntent(text, ctx) {
     return "I didn't catch that number. Could you say the digits one at a time?";
   }
 
-  // 2. Greeting
+  // 2. Global Commands (Questions asked at any time)
+  if (q.includes("where") || q.includes("location") || q.includes("address") || q.includes("located")) {
+    return "We are located at 123 Main Street in Boston. Can I help you schedule a repair?";
+  }
+  if (q.includes("hour") || q.includes("open") || q.includes("close")) {
+    return "Mass Mechanic is open 8 AM to 6 PM, Monday through Friday.";
+  }
+
+  // 3. Greeting State
   if (ctx.state === "greeting") {
-    if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair")) {
+    // If they mention a car immediately (e.g., "I have a Ford Explorer")
+    if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw") || q.includes("mercedes")) {
+      ctx.data.makeModel = text;
+      ctx.state = "collect_issue";
+      return "Got it. What seems to be the problem with the vehicle?";
+    }
+
+    // Standard booking triggers
+    if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair") || q.includes("help") || q.includes("car")) {
       ctx.state = "collect_details";
       return "I can help with that. What is the Year, Make, and Model of your vehicle?";
     }
-    if (q.includes("hour") || q.includes("open")) {
-      return "Mass Mechanic is open 8 AM to 6 PM, Monday through Friday.";
-    }
   }
 
-  // 3. Vehicle Details
+  // 4. Vehicle Details State
   if (ctx.state === "collect_details") {
     ctx.data.makeModel = text; 
     ctx.state = "collect_issue";
     return "Okay. And what seems to be the problem with the vehicle?";
   }
 
-  // 4. Issue Details
+  // 5. Issue Details State
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
     return "Understood. I'd like to have a mechanic look at this request. What is the best phone number to reach you at?";
   }
 
-  return "I can help you schedule a repair. What kind of car do you have?";
+  // Fallback - If we don't understand, assume they want to book and PUSH them to the next step
+  if (ctx.state === "greeting") {
+      ctx.state = "collect_details"; // Force state forward
+      return "I can help you schedule a repair. What kind of car do you have?";
+  }
+
+  return "Could you repeat that? I can help you schedule a repair.";
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 5. AUDIO PIPELINE (OpenAI TTS + FFmpeg MULAW Conversion)
+// 5. AUDIO PIPELINE (OpenAI TTS + FFmpeg MULAW)
 // ───────────────────────────────────────────────────────────────────────────────
-async function ttsToMulaw(text) { // <--- FIX: Renamed function
+async function ttsToMulaw(text) { 
   const url = "https://api.openai.com/v1/audio/speech";
   const res = await fetch(url, {
     method: "POST",
@@ -136,7 +155,7 @@ async function ttsToMulaw(text) { // <--- FIX: Renamed function
     },
     body: JSON.stringify({ 
       model: "tts-1", 
-      voice: "onyx", 
+      voice: "shimmer", // <--- CHANGED: "shimmer" is upbeat/friendly (or try "alloy")
       input: text, 
       response_format: "pcm" 
     }),
@@ -145,12 +164,11 @@ async function ttsToMulaw(text) { // <--- FIX: Renamed function
   if (!res.ok) throw new Error(`OpenAI Error: ${res.statusText}`);
   const inputBuffer = Buffer.from(await res.arrayBuffer());
 
-  // Convert 24k PCM -> 8k MULAW (Phone Standard)
   return new Promise((resolve, reject) => {
     const ff = spawn(ffmpegBin.path, [
       "-hide_banner", "-nostdin", "-loglevel", "error",
-      "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "pipe:0", // Input: OpenAI PCM
-      "-f", "mulaw", "-ar", "8000", "-ac", "1", "pipe:1"         // <--- FIX: Output: mulaw
+      "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "pipe:0",
+      "-f", "mulaw", "-ar", "8000", "-ac", "1", "pipe:1"
     ]);
     const chunks = [];
     ff.stdout.on("data", c => chunks.push(c));
@@ -170,7 +188,6 @@ wss.on("connection", (ws) => {
   ws._ctx = new ConversationContext();
   ws._speaking = false;
 
-  // <--- FIX: Changed encoding to 'mulaw' so we don't need to convert inbound audio
   const dg = new WebSocket(`wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&endpointing=true`, {
     headers: { Authorization: `Token ${DG_KEY}` }
   });
@@ -189,18 +206,12 @@ wss.on("connection", (ws) => {
 
       ws._speaking = true;
       try {
-        const audio = await ttsToMulaw(reply); // <--- FIX: Using mulaw function
-        
-        // Send to Twilio (Mulaw frames are 160 bytes for 20ms)
+        const audio = await ttsToMulaw(reply);
         const FRAME_SIZE = 160; 
         for (let i = 0; i < audio.length; i += FRAME_SIZE) {
           if (ws.readyState !== ws.OPEN) break;
           const frame = audio.slice(i, i + FRAME_SIZE).toString("base64");
-          ws.send(JSON.stringify({ 
-            event: "media", 
-            streamSid: ws._streamSid, 
-            media: { payload: frame } 
-          }));
+          ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: frame } }));
           await new Promise(r => setTimeout(r, 20));
         }
       } catch (e) {
@@ -217,24 +228,21 @@ wss.on("connection", (ws) => {
       ws._streamSid = data.start.streamSid;
       console.log("Call Started");
       
-      const greeting = "Thanks for calling Mass Mechanic. I can help you schedule a repair or answer questions. How can I help?";
+      const greeting = "Hi! Thanks for calling Mass Mechanic. I can help you schedule a repair or answer questions. How can I help?";
       
       (async () => {
          ws._speaking = true;
-         const audio = await ttsToMulaw(greeting); // <--- FIX: Using mulaw function
+         const audio = await ttsToMulaw(greeting);
          const FRAME_SIZE = 160;
          for (let i = 0; i < audio.length; i += FRAME_SIZE) {
            if (ws.readyState !== ws.OPEN) break;
-           ws.send(JSON.stringify({ 
-             event: "media", streamSid: ws._streamSid, media: { payload: audio.slice(i, i + FRAME_SIZE).toString("base64") } 
-           }));
+           ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: audio.slice(i, i + FRAME_SIZE).toString("base64") } }));
            await new Promise(r => setTimeout(r, 20));
          }
          ws._speaking = false;
       })();
     }
     if (data.event === "media" && dg.readyState === dg.OPEN) {
-      // Pass the raw Mulaw audio from Twilio directly to Deepgram
       const payload = Buffer.from(data.media.payload, "base64");
       dg.send(payload);
     }
