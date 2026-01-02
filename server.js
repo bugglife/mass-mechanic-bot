@@ -46,11 +46,18 @@ const NUMBER_WORDS_MAP = {
   'double': 'repeat_next', 'triple': 'triple_next'
 };
 
+// <--- FIX: Add mapping for "Tens" to handle "thirty sixty-four"
+const TENS_MAP = {
+  'twenty': '2', 'thirty': '3', 'forty': '4', 'fifty': '5',
+  'sixty': '6', 'seventy': '7', 'eighty': '8', 'ninety': '9'
+};
+
 function extractPhoneNumber(text) {
   const q = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").trim();
   let digits = '';
   const words = q.split(/\s+/);
   
+  // Standard regex match
   const match = q.match(/(\d{3})[\s.-]?(\d{3})[\s.-]?(\d{4})/);
   if (match) return match[0].replace(/\D/g, '');
 
@@ -58,13 +65,28 @@ function extractPhoneNumber(text) {
   while (i < words.length) {
     const word = words[i];
 
-    // Handle "Two Hundred" -> 200
+    // 1. Handle "Two Hundred" -> 200
     if (word === 'hundred') {
         digits += "00";
         i++; continue;
     }
 
-    // Handle "double 5"
+    // 2. Handle "Thirty", "Sixty-four", etc. <--- NEW LOGIC
+    if (TENS_MAP[word]) {
+       const firstDigit = TENS_MAP[word];
+       // Check next word: is it a single digit? (e.g. "thirty" ... "four")
+       if (i + 1 < words.length && NUMBER_WORDS_MAP[words[i+1]] && NUMBER_WORDS_MAP[words[i+1]].length === 1) {
+           // Case: "thirty four" -> 34
+           digits += firstDigit + NUMBER_WORDS_MAP[words[i+1]];
+           i += 2; continue;
+       } else {
+           // Case: "thirty" (pause) or "thirty sixty" -> 30
+           digits += firstDigit + '0';
+           i++; continue;
+       }
+    }
+
+    // 3. Handle "double 5"
     if (word === 'double' && i + 1 < words.length) {
       const nextDigit = NUMBER_WORDS_MAP[words[i + 1]];
       if (nextDigit && nextDigit.length === 1) {
@@ -73,6 +95,7 @@ function extractPhoneNumber(text) {
       }
     }
     
+    // 4. Standard words
     if (NUMBER_WORDS_MAP[word] && NUMBER_WORDS_MAP[word].length === 1) {
       digits += NUMBER_WORDS_MAP[word];
     } else if (/^\d+$/.test(word)) {
@@ -157,14 +180,9 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    
-    // <--- FIX: Smart check for short answers to avoid "Brain Farts"
-    // If answer is short (like "V70" or "the engine"), skip the heavy empathy
     if (text.split(" ").length < 3) {
         return "Understood. I'd like to have a mechanic look at that. What's the best phone number to reach you at?";
     }
-    
-    // If answer is longer, show empathy
     return "Oof, I hear you. That sounds frustrating. I want to get a pro to take a look at that ASAP. What's the best phone number to reach you at? You can start with just the area code.";
   }
 
@@ -222,7 +240,6 @@ wss.on("connection", (ws) => {
   console.log("🔗 Call Connected");
   ws._ctx = new ConversationContext();
   ws._speaking = false;
-  // <--- FIX: Add a cancellation token to stop audio loops instantly
   ws._currentMsgId = 0; 
 
   const dg = new WebSocket(`wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&endpointing=true`, {
@@ -237,42 +254,34 @@ wss.on("connection", (ws) => {
       
       console.log(`User: ${transcript}`);
       
-      // <--- BARGE-IN KILL SWITCH
-      // 1. Tell Twilio to clear the buffer
       if (ws._speaking) {
          console.log("!! Barge-in: Clearing audio !!");
          ws.send(JSON.stringify({ event: "clear", streamSid: ws._streamSid }));
       }
-      // 2. Increment Msg ID so the previous loop stops sending frames
       ws._currentMsgId++; 
 
       const reply = routeIntent(transcript, ws._ctx);
       console.log(`Bot: ${reply}`);
 
       ws._speaking = true;
-      const myMsgId = ws._currentMsgId; // Track this specific response
+      const myMsgId = ws._currentMsgId; 
 
       try {
         const audio = await ttsToMulaw(reply);
         
-        // If barge-in happened WHILE we were generating audio, abort now
         if (ws._currentMsgId !== myMsgId) return;
 
         const FRAME_SIZE = 160; 
         for (let i = 0; i < audio.length; i += FRAME_SIZE) {
-          // <--- CRITICAL CHECK: If a new message started, STOP this loop
           if (ws._currentMsgId !== myMsgId || ws.readyState !== ws.OPEN) break;
-          
           const frame = audio.slice(i, i + FRAME_SIZE).toString("base64");
           ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: frame } }));
           await new Promise(r => setTimeout(r, 20));
         }
 
-        // Only hang up if we finished speaking naturally (didn't get interrupted)
         if (ws._ctx.state === "closing" && ws._currentMsgId === myMsgId) {
            console.log("Conversation complete. Hanging up in 3s...");
            setTimeout(() => {
-             // Check one last time to make sure they didn't interrupt the goodbye
              if (ws._currentMsgId === myMsgId) {
                  console.log("Closing socket.");
                  ws.close(); 
@@ -283,7 +292,6 @@ wss.on("connection", (ws) => {
       } catch (e) {
         console.error(e);
       } finally {
-        // Only clear flag if WE are the ones who finished speaking
         if (ws._currentMsgId === myMsgId) {
             ws._speaking = false;
         }
