@@ -111,8 +111,17 @@ function routeIntent(text, ctx) {
   // 1. Phone Collection
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
+    
+    // <--- FIX: THE V70 PROTECTION RULE
+    // Only accept extracted numbers if:
+    // A) We already have some digits stored, OR
+    // B) The new extracted number is at least 3 digits (Area Code)
     if (extracted) {
-      ctx.data.phone += extracted;
+        if (ctx.data.phone.length > 0 || extracted.length >= 3) {
+            ctx.data.phone += extracted;
+        } else {
+            console.log(`[Ignored Short Number]: Heard "${extracted}" but ignored it because it's too short (likely 'V70' or 'Model X').`);
+        }
     }
     
     const len = ctx.data.phone.length;
@@ -141,8 +150,7 @@ function routeIntent(text, ctx) {
        return `Sorry, I missed that last part. I have ${len} digits so far. What are the last few?`;
     }
 
-    // <--- FIX: "Polite Pivot" for text interruptions (e.g., "when i break")
-    // Instead of saying "I didn't catch that", assume they gave a detail and ask again.
+    // <--- "Polite Pivot" fallback
     return "Okay, noted. What is the best phone number to reach you at?";
   }
 
@@ -178,9 +186,9 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    if (text.split(" ").length < 3) {
-        return "Understood. I'd like to have a mechanic look at that. What's the best phone number to reach you at?";
-    }
+    
+    // <--- FIX: Removed the "Short Answer" check that was causing the crash.
+    // Now we ALWAYS give the full empathetic response.
     return "Oof, I hear you. That sounds frustrating. I want to get a pro to take a look at that ASAP. What's the best phone number to reach you at? You can start with just the area code.";
   }
 
