@@ -51,14 +51,12 @@ function extractPhoneNumber(text) {
   let digits = '';
   const words = q.split(/\s+/);
   
-  // Try to match standard formats first
   const match = q.match(/(\d{3})[\s.-]?(\d{3})[\s.-]?(\d{4})/);
   if (match) return match[0].replace(/\D/g, '');
 
   let i = 0;
   while (i < words.length) {
     const word = words[i];
-    // Handle "double 5"
     if (word === 'double' && i + 1 < words.length) {
       const nextDigit = NUMBER_WORDS_MAP[words[i + 1]];
       if (nextDigit && nextDigit.length === 1) {
@@ -89,26 +87,25 @@ function routeIntent(text, ctx) {
       ctx.data.phone += extracted;
       const len = ctx.data.phone.length;
 
-      // Logic for "Chunked" responses
+      // Smart "Next Step" Prompts
       if (len === 3) {
-         return `Got it, ${ctx.data.phone.split('').join(' ')}. What are the next three digits?`;
+         return `Got it, ${ctx.data.phone.split('').join(' ')}. What are the next three?`;
       }
       if (len === 6) {
          const last3 = ctx.data.phone.slice(3, 6).split('').join(' ');
-         return `Okay, ${last3}. And the last four digits?`;
+         return `Okay, ${last3}. And the last four?`;
       }
       if (len >= 10) {
         ctx.state = "closing";
-        const p = ctx.data.phone;
+        // Trim to 10 if they gave too many
+        const p = ctx.data.phone.slice(0, 10);
         const formatted = `${p[0]} ${p[1]} ${p[2]}, ${p[3]} ${p[4]} ${p[5]}, ${p[6]} ${p[7]} ${p[8]} ${p[9]}`;
         return `Perfect. I have ${formatted}. A mechanic will call you shortly to confirm. Thanks for choosing Mass Mechanic!`;
       }
       
-      // Weird length (e.g. they said 4 numbers)
       return `I have ${len} digits so far. What comes next?`;
     }
     
-    // Fallback if no numbers heard
     return "I didn't catch that number. Could you start with just the area code?";
   }
 
@@ -122,7 +119,7 @@ function routeIntent(text, ctx) {
 
   // 3. Greeting State
   if (ctx.state === "greeting") {
-    if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw")) {
+    if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw") || q.includes("volvo")) {
       ctx.data.makeModel = text;
       ctx.state = "collect_issue";
       return "Got it. What seems to be the problem with the vehicle?";
@@ -144,7 +141,6 @@ function routeIntent(text, ctx) {
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    // <--- FIX: Ask specifically for Area Code first
     return "Understood. I'd like to have a mechanic call you back. What's your phone number? You can start with just the area code.";
   }
 
@@ -170,7 +166,7 @@ async function ttsToMulaw(text) {
     },
     body: JSON.stringify({ 
       model: "tts-1", 
-      voice: "alloy", // <--- FIX: "alloy" is bright/energetic. "echo" is softer male.
+      voice: "shimmer", // <--- CHANGED: "shimmer" is often clearer/brighter than alloy
       input: text, 
       response_format: "pcm" 
     }),
@@ -214,7 +210,12 @@ wss.on("connection", (ws) => {
       if (!transcript.trim()) return;
       
       console.log(`User: ${transcript}`);
-      if (ws._speaking) return; 
+      
+      // <--- BARGE-IN FIX: If user speaks, STOP the bot's current audio immediately
+      if (ws._speaking) {
+         console.log("!! Barge-in detected: Clearing audio !!");
+         ws.send(JSON.stringify({ event: "clear", streamSid: ws._streamSid }));
+      }
 
       const reply = routeIntent(transcript, ws._ctx);
       console.log(`Bot: ${reply}`);
