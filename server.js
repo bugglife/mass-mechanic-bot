@@ -96,7 +96,6 @@ function routeIntent(text, ctx) {
           ctx.state = "take_message";
           return "Great. Leave your message with me and I'll text a team member about your concern. What would you like me to tell them?";
       }
-      // If they say "No" or ask something else, go back to helping
       ctx.state = "greeting";
       return "Okay, no problem. I can help you find a mechanic or answer general questions. How can I help?";
   }
@@ -168,7 +167,6 @@ function routeIntent(text, ctx) {
 
   // ─── 4. BOOKING FLOW ───
 
-  // State: Greeting (Fork in the road)
   if (ctx.state === "greeting") {
     if (q.includes("book") || q.includes("schedule") || q.includes("repair") || q.includes("quote") || q.includes("fix") || q.includes("find")) {
       ctx.state = "collect_zip";
@@ -180,7 +178,6 @@ function routeIntent(text, ctx) {
     return "Are you looking to find a mechanic for a repair, or do you have questions about how we work?";
   }
 
-  // State: Collect Zip
   if (ctx.state === "collect_zip") {
       const zipMatch = text.match(/\b\d{5}\b/) || text.match(/(\d\s*){5}/);
       if (zipMatch) {
@@ -196,7 +193,6 @@ function routeIntent(text, ctx) {
       return "I need a Zip Code or City to find mechanics near you. Where are you located?";
   }
 
-  // State: Vehicle Details
   if (ctx.state === "collect_details") {
     if (text.length < 10 && (q.includes("i have") || q.includes("it is") || q.includes("my car is"))) {
         return null; 
@@ -215,7 +211,6 @@ function routeIntent(text, ctx) {
     return "Okay, got it. And can you tell me a little bit about what's going on with it?";
   }
 
-  // State: Issue Details
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
@@ -290,6 +285,13 @@ wss.on("connection", (ws) => {
       if (!transcript.trim()) return;
       
       console.log(`User: ${transcript}`);
+
+      // <--- FIX: THE ZOMBIE KILL SWITCH
+      // If we are already closing, ignore everything.
+      if (ws._ctx.state === "closing") {
+          console.log("Ignored input (Closing state active)");
+          return;
+      }
       
       if (ws._speaking) {
          console.log("!! Barge-in: Clearing audio !!");
