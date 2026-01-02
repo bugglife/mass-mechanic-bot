@@ -4,6 +4,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { spawn } from "child_process";
 import ffmpegBin from "@ffmpeg-installer/ffmpeg";
 import twilio from "twilio"; 
+import { createClient } from "@supabase/supabase-js"; 
 
 // ───────────────────────────────────────────────────────────────────────────────
 // 1. CONFIGURATION
@@ -19,12 +20,18 @@ const TWILIO_AUTH = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_PHONE = process.env.TWILIO_PHONE_NUMBER; 
 const MY_PHONE = process.env.MY_PHONE_NUMBER;         
 
-if (!OPENAI_API_KEY || !DG_KEY || !TWILIO_SID || !TWILIO_AUTH) {
+// Supabase Keys
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+
+if (!OPENAI_API_KEY || !DG_KEY || !TWILIO_SID || !TWILIO_AUTH || !SUPABASE_URL || !SUPABASE_KEY) {
   console.error("❌ Missing API Keys. Check your .env file.");
   process.exit(1);
 }
 
+// Initialize Clients
 const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH);
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ───────────────────────────────────────────────────────────────────────────────
 // 2. CONVERSATION BRAIN
@@ -34,13 +41,13 @@ class ConversationContext {
     this.state = "greeting"; 
     this.data = {
       name: null,
-      zip: null,
+      zip: "Not Provided", 
       phone: "",       
       callerId: "",
-      makeModel: null, 
-      issue: null,     
+      makeModel: "Not Provided", 
+      issue: "Not Provided",     
       message: "",
-      manualContact: "", // <--- Stores "Bob, 508-555..."
+      manualContact: "", 
       userType: "driver"
     };
   }
@@ -49,6 +56,7 @@ class ConversationContext {
 // ───────────────────────────────────────────────────────────────────────────────
 // 3. UTILITIES
 // ───────────────────────────────────────────────────────────────────────────────
+
 function sendSms(to, body) {
     twilioClient.messages.create({
         body: body,
@@ -56,6 +64,41 @@ function sendSms(to, body) {
         to: to
     }).then(msg => console.log(`✅ SMS sent to ${to}`))
       .catch(err => console.error(`❌ SMS Failed: ${err.message}`));
+}
+
+// <--- UPDATED: Pointing to 'phone_leads' table
+async function saveToSupabase(data) {
+    try {
+        const bestPhone = data.phone || data.manualContact || data.callerId || "Unknown";
+
+        const { error } = await supabase
+            .from('phone_leads') // <--- CHANGED TABLE NAME
+            .insert({
+                phone: bestPhone,
+                zip: data.zip,
+                make_model: data.makeModel,
+                issue: data.issue,
+                message: data.message,
+                user_type: data.userType
+            });
+
+        if (error) throw error;
+        console.log("🚀 Data saved to Supabase (phone_leads)!");
+    } catch (err) {
+        console.error("❌ Supabase Insert Failed:", err.message);
+    }
+}
+
+function generateReport(data) {
+    let report = "";
+    if (data.userType === "manager_request") {
+        const contact = data.manualContact || data.callerId || "Unknown";
+        report = `🚨 MANAGER REQUEST\nFrom: ${contact}\n\nMessage:\n"${data.message.trim()}"`;
+    } else {
+        const contact = data.phone || data.callerId || "Unknown";
+        report = `🚗 NEW LEAD\nZip: ${data.zip}\nCar: ${data.makeModel}\nIssue: ${data.issue}\nPhone: ${contact}`;
+    }
+    return report;
 }
 
 const NUMBER_WORDS_MAP = {
@@ -107,26 +150,21 @@ function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
   // ─── MANAGER FLOW ───
-  
-  // Step 1: Trigger
   if (q.includes("manager") || q.includes("operator") || q.includes("supervisor") || q.includes("owner") || q.includes("speak with") || q.includes("talk to a person") || q.includes("real person")) {
       ctx.state = "confirm_manager";
       return "Would you like me to connect you with a member of our team?";
   }
 
-  // Step 2: Confirm -> Ask for Contact Info
   if (ctx.state === "confirm_manager") {
       if (q.includes("yes") || q.includes("yeah") || q.includes("sure") || q.includes("please")) {
           ctx.state = "collect_contact_info"; 
+          ctx.data.userType = "manager_request"; 
           return "Okay. First, what is your name and the best phone number to reach you at?";
       }
       ctx.state = "greeting";
       return "Okay, no problem. I can help you find a mechanic or answer general questions. How can I help?";
   }
   
-  // NOTE: The "collect_contact_info" logic is now handled in the BUFFER section below (dg.on)
-  // We removed it from here so it doesn't trigger immediately.
-
   // ─── BOOKING FLOW ───
   if (ctx.state === "confirm_phone") {
       if (q.includes("no") || q.includes("wrong") || q.includes("wait")) {
@@ -171,7 +209,7 @@ function routeIntent(text, ctx) {
   }
 
   if (ctx.state === "greeting") {
-    if (q.includes("book") || q.includes("schedule") || q.includes("repair") || q.includes("quote") || q.includes("fix")) {
+    if (q.includes("book") || q.includes("schedule") || q.includes("repair") || q.includes("quote") || q.includes("fix") || q.includes("yes") || q.includes("sure") || q.includes("yeah")) {
       ctx.state = "collect_zip";
       return "Great. I can help with that. To find the closest shops to you, what is your Zip Code?";
     }
@@ -202,7 +240,7 @@ function routeIntent(text, ctx) {
          ctx.data.makeModel = text; 
          return `Okay, ${text}. And what is the Make and Model?`;
     }
-    if (ctx.data.makeModel) ctx.data.makeModel += " " + text;
+    if (ctx.data.makeModel !== "Not Provided") ctx.data.makeModel += " " + text;
     else ctx.data.makeModel = text;
 
     ctx.state = "collect_issue";
@@ -259,7 +297,14 @@ async function speakResponse(ws, text) {
             ws.send(JSON.stringify({ event: "media", streamSid: ws._streamSid, media: { payload: frame } }));
             await new Promise(r => setTimeout(r, 20));
         }
+        
         if (ws._ctx.state === "closing" && ws._currentMsgId === myMsgId) {
+           const report = generateReport(ws._ctx.data);
+           if (MY_PHONE) sendSms(MY_PHONE, report);
+           
+           // <--- CALLING THE DATABASE SAVE
+           saveToSupabase(ws._ctx.data);
+
            setTimeout(() => { if (ws._currentMsgId === myMsgId) ws.close(); }, 3000);
         }
     } catch (e) { console.error(e); } 
@@ -277,7 +322,7 @@ wss.on("connection", (ws) => {
   ws._speaking = false;
   ws._currentMsgId = 0; 
   ws._messageTimer = null; 
-  ws._contactTimer = null; // <--- NEW: Timer for Contact Info Buffer
+  ws._contactTimer = null;
 
   const dg = new WebSocket(`wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&endpointing=true`, {
     headers: { Authorization: `Token ${DG_KEY}` }
@@ -292,15 +337,11 @@ wss.on("connection", (ws) => {
 
       if (ws._ctx.state === "closing") return; 
 
-      // ─── 1. BUFFER: CONTACT INFO (Wait 3s for silence) ───
       if (ws._ctx.state === "collect_contact_info") {
           ws._ctx.data.manualContact += " " + transcript;
           console.log(`📝 Contact Buffer: "${ws._ctx.data.manualContact.trim()}"`);
-
           if (ws._contactTimer) clearTimeout(ws._contactTimer);
-          
           ws._contactTimer = setTimeout(() => {
-              // Wait 3 seconds of silence, THEN move on
               ws._ctx.state = "take_message";
               const reply = "Thanks. Go ahead with your message, and I'll text it to them immediately.";
               speakResponse(ws, reply);
@@ -308,21 +349,17 @@ wss.on("connection", (ws) => {
           return;
       }
       
-      // ─── 2. BUFFER: VOICEMAIL (Wait 6s for silence) ───
       if (ws._ctx.state === "take_message") {
           ws._ctx.data.message += " " + transcript;
           console.log(`📝 Message Buffer: "${ws._ctx.data.message.trim()}"`);
-
           if (ws._messageTimer) clearTimeout(ws._messageTimer);
-          
           ws._messageTimer = setTimeout(() => {
               console.log("Message recording finished.");
               ws._ctx.state = "closing"; 
               
-              const who = ws._ctx.data.manualContact || ws._ctx.data.callerId || "Unknown";
-              const note = `📞 Voicemail from:\n${who}\n\nMessage:\n"${ws._ctx.data.message.trim()}"`;
-              
-              if (MY_PHONE) sendSms(MY_PHONE, note);
+              const report = generateReport(ws._ctx.data);
+              if (MY_PHONE) sendSms(MY_PHONE, report);
+              saveToSupabase(ws._ctx.data);
               
               const reply = "Thanks. I've sent that text to them immediately. They should get back to you soon. Thanks for calling Mass Mechanic! Bye now.";
               speakResponse(ws, reply);
@@ -330,7 +367,6 @@ wss.on("connection", (ws) => {
           return; 
       }
       
-      // ─── 3. NORMAL CONVERSATION ───
       if (ws._speaking) {
          console.log("!! Barge-in: Clearing audio !!");
          ws.send(JSON.stringify({ event: "clear", streamSid: ws._streamSid }));
