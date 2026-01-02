@@ -51,12 +51,14 @@ function extractPhoneNumber(text) {
   let digits = '';
   const words = q.split(/\s+/);
   
+  // Try to match standard formats first
   const match = q.match(/(\d{3})[\s.-]?(\d{3})[\s.-]?(\d{4})/);
   if (match) return match[0].replace(/\D/g, '');
 
   let i = 0;
   while (i < words.length) {
     const word = words[i];
+    // Handle "double 5"
     if (word === 'double' && i + 1 < words.length) {
       const nextDigit = NUMBER_WORDS_MAP[words[i + 1]];
       if (nextDigit && nextDigit.length === 1) {
@@ -80,22 +82,37 @@ function extractPhoneNumber(text) {
 function routeIntent(text, ctx) {
   const q = text.toLowerCase();
 
-  // 1. Phone Collection (Highest Priority)
+  // 1. Phone Collection (Guided Chunking)
   if (ctx.state === "collect_phone") {
     const extracted = extractPhoneNumber(text);
     if (extracted) {
       ctx.data.phone += extracted;
-      if (ctx.data.phone.length >= 10) {
-        ctx.state = "closing";
-        return `Got it. I have ${ctx.data.phone.split('').join(' ')}. A mechanic will call you back shortly. Thanks for calling Mass Mechanic!`;
-      } else {
-        return `I have ${ctx.data.phone.length} digits so far. What are the last ${10 - ctx.data.phone.length}?`;
+      const len = ctx.data.phone.length;
+
+      // Logic for "Chunked" responses
+      if (len === 3) {
+         return `Got it, ${ctx.data.phone.split('').join(' ')}. What are the next three digits?`;
       }
+      if (len === 6) {
+         const last3 = ctx.data.phone.slice(3, 6).split('').join(' ');
+         return `Okay, ${last3}. And the last four digits?`;
+      }
+      if (len >= 10) {
+        ctx.state = "closing";
+        const p = ctx.data.phone;
+        const formatted = `${p[0]} ${p[1]} ${p[2]}, ${p[3]} ${p[4]} ${p[5]}, ${p[6]} ${p[7]} ${p[8]} ${p[9]}`;
+        return `Perfect. I have ${formatted}. A mechanic will call you shortly to confirm. Thanks for choosing Mass Mechanic!`;
+      }
+      
+      // Weird length (e.g. they said 4 numbers)
+      return `I have ${len} digits so far. What comes next?`;
     }
-    return "I didn't catch that number. Could you say the digits one at a time?";
+    
+    // Fallback if no numbers heard
+    return "I didn't catch that number. Could you start with just the area code?";
   }
 
-  // 2. Global Commands (Questions asked at any time)
+  // 2. Global Commands
   if (q.includes("where") || q.includes("location") || q.includes("address") || q.includes("located")) {
     return "We are located at 123 Main Street in Boston. Can I help you schedule a repair?";
   }
@@ -105,37 +122,35 @@ function routeIntent(text, ctx) {
 
   // 3. Greeting State
   if (ctx.state === "greeting") {
-    // If they mention a car immediately (e.g., "I have a Ford Explorer")
-    if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw") || q.includes("mercedes")) {
+    if (q.includes("ford") || q.includes("toyota") || q.includes("honda") || q.includes("nissan") || q.includes("chevy") || q.includes("bmw")) {
       ctx.data.makeModel = text;
       ctx.state = "collect_issue";
       return "Got it. What seems to be the problem with the vehicle?";
     }
-
-    // Standard booking triggers
     if (q.includes("book") || q.includes("appointment") || q.includes("schedule") || q.includes("broken") || q.includes("repair") || q.includes("help") || q.includes("car")) {
       ctx.state = "collect_details";
       return "I can help with that. What is the Year, Make, and Model of your vehicle?";
     }
   }
 
-  // 4. Vehicle Details State
+  // 4. Vehicle Details
   if (ctx.state === "collect_details") {
     ctx.data.makeModel = text; 
     ctx.state = "collect_issue";
     return "Okay. And what seems to be the problem with the vehicle?";
   }
 
-  // 5. Issue Details State
+  // 5. Issue Details -> Start Phone Collection
   if (ctx.state === "collect_issue") {
     ctx.data.issue = text;
     ctx.state = "collect_phone";
-    return "Understood. I'd like to have a mechanic look at this request. What is the best phone number to reach you at?";
+    // <--- FIX: Ask specifically for Area Code first
+    return "Understood. I'd like to have a mechanic call you back. What's your phone number? You can start with just the area code.";
   }
 
-  // Fallback - If we don't understand, assume they want to book and PUSH them to the next step
+  // Fallback
   if (ctx.state === "greeting") {
-      ctx.state = "collect_details"; // Force state forward
+      ctx.state = "collect_details";
       return "I can help you schedule a repair. What kind of car do you have?";
   }
 
@@ -155,7 +170,7 @@ async function ttsToMulaw(text) {
     },
     body: JSON.stringify({ 
       model: "tts-1", 
-      voice: "shimmer", // <--- CHANGED: "shimmer" is upbeat/friendly (or try "alloy")
+      voice: "alloy", // <--- FIX: "alloy" is bright/energetic. "echo" is softer male.
       input: text, 
       response_format: "pcm" 
     }),
