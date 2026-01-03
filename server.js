@@ -36,12 +36,12 @@ const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH);
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 2. LEAD DISPATCHER (The Bridge to your Edge Function)
+// 2. INTELLIGENT LEAD DISPATCHER
 // ───────────────────────────────────────────────────────────────────────────────
 async function extractAndDispatchLead(history, userPhone) {
     console.log("🧠 Processing Lead for Dispatch...");
 
-    // This prompt maps directly to your 'quoteform.tsx' fields
+    // Prompt maps to QuoteForm fields
     const extractionPrompt = `
     Analyze this SMS conversation and extract the lead details into JSON.
     
@@ -52,8 +52,8 @@ async function extractAndDispatchLead(history, userPhone) {
     - zip_code: (String, 5 digits)
     - description: (String, the core issue)
     
-    CRITICAL SCORING FIELDS (Must match allowed values):
-    - service_type: (Map to ONE: 'no-start', 'brake-repair', 'oil-change', 'check-engine-light', 'suspension-repair', 'exhaust-repair', 'battery-replacement', 'overheating', 'other')
+    CRITICAL SCORING FIELDS:
+    - service_type: (Map to ONE: 'oil-change', 'state-inspection', 'tune-up', 'tire-rotation', 'no-start', 'brake-repair', 'check-engine-light', 'suspension-repair', 'exhaust-repair', 'battery-replacement', 'overheating', 'other')
     - drivable: (Map to ONE: 'Yes', 'No', 'Not sure')
     - urgency_window: (Map to ONE: 'Today', '1-2 days', 'This week', 'Flexible')
 
@@ -79,7 +79,7 @@ async function extractAndDispatchLead(history, userPhone) {
         const extractData = await gptExtract.json();
         const leadDetails = JSON.parse(extractData.choices[0].message.content);
         
-        console.log("📝 Extracted for Scoring:", leadDetails);
+        console.log("📝 Extracted Data:", leadDetails);
 
         // 1. Insert into 'leads' table
         const { data: insertedLead, error: insertError } = await supabase
@@ -101,12 +101,26 @@ async function extractAndDispatchLead(history, userPhone) {
 
         if (insertError) throw new Error(insertError.message);
 
-        // 2. Trigger the Edge Function (send-lead-to-mechanics)
-        // This will calculate the Score/Tier and dispatch if high enough
-        await supabase.functions.invoke('send-lead-to-mechanics', {
-            body: { lead_id: insertedLead.id }
-        });
-        console.log("🚀 Scoring & Dispatch Triggered.");
+        // 2. ROUTING LOGIC (Maintenance vs Repair)
+        //
+        const maintenanceServices = ['oil-change', 'state-inspection', 'tune-up', 'tire-rotation'];
+        const isMaintenance = maintenanceServices.includes(leadDetails.service_type);
+
+        if (isMaintenance) {
+            console.log("🔧 Detected Maintenance Lead. Routing to Subscription Pool...");
+            // Route to: send-maintenance-lead-to-mechanics
+            await supabase.functions.invoke('send-maintenance-lead-to-mechanics', {
+                body: { lead_id: insertedLead.id }
+            });
+        } else {
+            console.log("🚨 Detected Repair Lead. Routing to Urgent Blast...");
+            // Route to: send-lead-to-mechanics
+            await supabase.functions.invoke('send-lead-to-mechanics', {
+                body: { lead_id: insertedLead.id }
+            });
+        }
+
+        console.log("🚀 Dispatch Complete.");
 
     } catch (e) {
         console.error("❌ Dispatch Failed:", e);
@@ -210,7 +224,7 @@ class ConversationContext {
     this.data = { name: null, zip: "Not Provided", phone: "", userType: "driver" };
   }
 }
-// ... (Keep the rest of your voice logic here) ...
+// ... (Voice logic remains here) ...
 
 const server = app.listen(PORT, () => console.log(`MassMechanic Server on ${PORT}`));
 
@@ -221,5 +235,5 @@ server.on("upgrade", (req, socket, head) => {
 
 wss.on("connection", (ws) => {
   console.log("🔗 Voice Call Connected");
-  // ... (Keep WebSocket logic) ...
+  // ... (WebSocket logic) ...
 });
