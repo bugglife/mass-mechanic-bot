@@ -15,6 +15,16 @@ const PORT = process.env.PORT || 10000;
 // SUPPORT BOTH JSON (Supabase) AND URL-ENCODED (Twilio Legacy)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// ... existing imports ...
+const app = express();
+// ... existing app.use ...
+
+// --- ADD THIS HEALTH CHECK ROUTE ---
+app.get('/', (req, res) => {
+    res.send("Mass Mechanic Server is Awake 🤖");
+});
+
+// ... rest of your code ...
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY; 
 const DG_KEY = process.env.DEEPGRAM_API_KEY;
