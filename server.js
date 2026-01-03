@@ -12,7 +12,7 @@ import { createClient } from "@supabase/supabase-js";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// <--- CHANGED: Support JSON (from Supabase) and Form (legacy)
+// SUPPORT BOTH JSON (Supabase) AND URL-ENCODED (Twilio Legacy)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -36,18 +36,30 @@ const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH);
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 2. LEAD DISPATCHER (Background Worker)
+// 2. LEAD DISPATCHER (The Bridge to your Edge Function)
 // ───────────────────────────────────────────────────────────────────────────────
 async function extractAndDispatchLead(history, userPhone) {
     console.log("🧠 Processing Lead for Dispatch...");
 
+    // This prompt maps directly to your 'quoteform.tsx' fields
     const extractionPrompt = `
     Analyze this SMS conversation and extract the lead details into JSON.
-    FIELDS: name, car_year, car_make_model, zip_code, description, service_type, drivable (Yes/No), urgency_window.
+    
+    FIELDS TO EXTRACT:
+    - name: (String)
+    - car_year: (String, e.g. "2015")
+    - car_make_model: (String, e.g. "Honda Civic")
+    - zip_code: (String, 5 digits)
+    - description: (String, the core issue)
+    
+    CRITICAL SCORING FIELDS (Must match allowed values):
+    - service_type: (Map to ONE: 'no-start', 'brake-repair', 'oil-change', 'check-engine-light', 'suspension-repair', 'exhaust-repair', 'battery-replacement', 'overheating', 'other')
+    - drivable: (Map to ONE: 'Yes', 'No', 'Not sure')
+    - urgency_window: (Map to ONE: 'Today', '1-2 days', 'This week', 'Flexible')
+
     RULES: 
-    - If 'drivable' implies towing (wont start, stuck), set 'No'. 
+    - If 'drivable' implies towing (wont start, stuck, wheel fell off), set 'No'. 
     - If 'urgency' is not stated, default to 'Flexible'.
-    - 'service_type' must match one of: no-start, brake-repair, oil-change, check-engine-light, suspension-repair, exhaust-repair, other.
     `;
 
     try {
@@ -67,8 +79,9 @@ async function extractAndDispatchLead(history, userPhone) {
         const extractData = await gptExtract.json();
         const leadDetails = JSON.parse(extractData.choices[0].message.content);
         
-        console.log("📝 Extracted:", leadDetails);
+        console.log("📝 Extracted for Scoring:", leadDetails);
 
+        // 1. Insert into 'leads' table
         const { data: insertedLead, error: insertError } = await supabase
             .from('leads')
             .insert({
@@ -88,11 +101,12 @@ async function extractAndDispatchLead(history, userPhone) {
 
         if (insertError) throw new Error(insertError.message);
 
-        // Fire the Edge Function
+        // 2. Trigger the Edge Function (send-lead-to-mechanics)
+        // This will calculate the Score/Tier and dispatch if high enough
         await supabase.functions.invoke('send-lead-to-mechanics', {
             body: { lead_id: insertedLead.id }
         });
-        console.log("🚀 Edge Function Triggered.");
+        console.log("🚀 Scoring & Dispatch Triggered.");
 
     } catch (e) {
         console.error("❌ Dispatch Failed:", e);
@@ -100,54 +114,52 @@ async function extractAndDispatchLead(history, userPhone) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 3. SMS ROUTER (WORKER NODE)
+// 3. SMS ROUTER (Worker Node)
 // ───────────────────────────────────────────────────────────────────────────────
 app.post('/sms', async (req, res) => {
-    // 1. Accept JSON from Supabase (fallback to Form data for testing)
+    // Input Handling (JSON from Supabase, or Form from Twilio Fallback)
     const incomingMsg = req.body.body || req.body.Body; 
     const fromNumber = req.body.from || req.body.From;
     
-    // 2. ACKNOWLEDGE IMMEDIATELY (Prevent Supabase Timeout)
+    // Acknowledge immediately (200 OK)
     res.status(200).send("OK");
 
-    if (!incomingMsg || !fromNumber) {
-        console.log("⚠️ Ignored empty request");
-        return;
-    }
+    if (!incomingMsg || !fromNumber) return;
 
-    console.log(`📩 SMS Payload from Router (${fromNumber}): ${incomingMsg}`);
+    console.log(`📩 SMS from ${fromNumber}: ${incomingMsg}`);
 
-    // 3. SYSTEM PROMPT (Tweaked to fix the "Loop" issue)
+    // System Prompt (Service Advisor Persona)
     const systemPrompt = `
     You are the Senior Service Advisor for Mass Mechanic.
     
-    GOAL: Qualify this lead by gathering these 6 items:
+    GOAL: Qualify this lead. We need specific details to score the lead.
+    
+    GATHER THESE 6 ITEMS:
     1. Name
     2. Car Year/Make/Model
     3. Zip Code
     4. Issue Description
-    5. Drivability ("Is it drivable or need a tow?")
-    6. Urgency ("Need it today or flexible?")
+    5. Drivability ("Is it drivable or need a tow?") -> Critical for Scoring
+    6. Urgency ("Need it today or flexible?") -> Critical for Scoring
 
-    CRITICAL RULES:
-    - CHECK HISTORY FIRST: If the user just answered a question (e.g. "It is drivable"), DO NOT ask it again.
+    RULES:
+    - CHECK HISTORY: If the user answered a question implicitly (e.g. "Can I come tomorrow?" = Urgency), accept it.
     - Ask 1 question at a time.
-    - Once you have ALL 6 items, say EXACTLY: "Perfect. I have sent your request to our network. A shop will text you shortly with a quote."
-    - Be concise and professional.
+    - Once you have ALL 6, say EXACTLY: "Perfect. I have sent your request to our network. A shop will text you shortly with a quote."
     `;
 
     try {
-        // 4. RETRIEVE HISTORY
+        // Retrieve History
         const { data: history } = await supabase
             .from('sms_chat_history')
             .select('role, content')
             .eq('phone', fromNumber)
             .order('created_at', { ascending: true }) 
-            .limit(12); // Increased context window
+            .limit(12);
 
         const pastMessages = (history || []).map(msg => ({ role: msg.role, content: msg.content }));
         
-        // 5. GENERATE REPLY
+        // Generate Reply
         const gptResponse = await fetch("https://api.openai.com/v1/chat/completions", {
             method: "POST",
             headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
@@ -165,39 +177,43 @@ app.post('/sms', async (req, res) => {
         const data = await gptResponse.json();
         const replyText = data.choices[0].message.content;
 
-        // 6. SAVE TO DB
+        // Save History
         await supabase.from('sms_chat_history').insert([
             { phone: fromNumber, role: 'user', content: incomingMsg },
             { phone: fromNumber, role: 'assistant', content: replyText }
         ]);
 
-        // 7. SEND REPLY VIA TWILIO API (No TwiML)
+        // Send Reply via API
         await twilioClient.messages.create({
             body: replyText,
             from: TWILIO_PHONE,
             to: fromNumber
         });
-        console.log(`📤 SMS Reply Sent: ${replyText}`);
+        console.log(`📤 Reply Sent: ${replyText}`);
 
-        // 8. DISPATCH IF DONE
+        // Check for Completion -> Trigger Extraction
         if (replyText.includes("sent your request")) {
             extractAndDispatchLead([...pastMessages, { role: "user", content: incomingMsg }, { role: "assistant", content: replyText }], fromNumber);
         }
 
     } catch (error) {
-        console.error("❌ SMS Worker Error:", error);
+        console.error("❌ SMS Error:", error);
     }
 });
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 4. VOICE SERVER (Unchanged Logic)
+// 4. VOICE SERVER (Unchanged)
 // ───────────────────────────────────────────────────────────────────────────────
-// (Keep your existing ConversationContext and routeIntent logic here)
-// ...
+class ConversationContext {
+  constructor() {
+    this.state = "greeting"; 
+    this.data = { name: null, zip: "Not Provided", phone: "", userType: "driver" };
+  }
+}
+// ... (Keep the rest of your voice logic here) ...
 
 const server = app.listen(PORT, () => console.log(`MassMechanic Server on ${PORT}`));
 
-// WebSockets for Voice
 const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
@@ -205,5 +221,5 @@ server.on("upgrade", (req, socket, head) => {
 
 wss.on("connection", (ws) => {
   console.log("🔗 Voice Call Connected");
-  // ... (Your existing WebSocket logic)
+  // ... (Keep WebSocket logic) ...
 });
