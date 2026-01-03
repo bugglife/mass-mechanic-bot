@@ -34,12 +34,12 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 2. HEALTH CHECK (For Cron Job)
+// 2. HEALTH CHECK
 // ───────────────────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send("Mass Mechanic Server is Awake 🤖"));
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 3. SMS WORKER (Router-Compatible)
+// 3. SMS WORKER (Service Advisor)
 // ───────────────────────────────────────────────────────────────────────────────
 async function extractAndDispatchLead(history, userPhone) {
     console.log("🧠 Processing Lead for Dispatch...");
@@ -120,15 +120,16 @@ app.post('/sms', async (req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 4. VOICE SERVER (FIXED: GREETS USER FIRST)
+// 4. VOICE SERVER (WITH MEMORY & GREETING)
 // ───────────────────────────────────────────────────────────────────────────────
 
 app.post('/', (req, res) => {
   res.type("text/xml");
-  // <Say> breaks the silence and prompts the user to speak
+  // We use <Say> to break the ice immediately.
+  // Then <Pause> to give the user a split second to process before the connection opens.
   res.send(`
     <Response>
-      <Say voice="alice">Thank you for calling Mass Mechanic. Please state your name and the issue with your car.</Say>
+      <Say voice="alice">Thank you for calling Mass Mechanic. Please tell me your name and how I can help you today.</Say>
       <Connect>
         <Stream url="wss://${req.headers.host}/" />
       </Connect>
@@ -147,6 +148,14 @@ wss.on("connection", (ws) => {
   console.log("🔗 Voice Connected");
   let streamSid = null;
   let deepgramLive = null;
+  
+  // --- MEMORY: Store the conversation context here ---
+  let messages = [
+    { 
+      role: "system", 
+      content: "You are the helpful voice assistant for Mass Mechanic. You are speaking to a customer on the phone. Keep answers SHORT (1-2 sentences). Your goal is to get their Name, Zip Code, and Car Issue. Be friendly and natural." 
+    }
+  ];
 
   // 1. SETUP DEEPGRAM (LISTENER)
   const setupDeepgram = () => {
@@ -154,7 +163,7 @@ wss.on("connection", (ws) => {
       headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
     });
     
-    deepgramLive.on("open", () => console.log("🟢 Deepgram Connected"));
+    deepgramLive.on("open", () => console.log("🟢 Deepgram Listening"));
     
     deepgramLive.on("message", (data) => {
       const received = JSON.parse(data);
@@ -170,25 +179,29 @@ wss.on("connection", (ws) => {
 
   setupDeepgram();
 
-  // 2. AI BRAIN & SPEAKING (NATIVE AUDIO)
+  // 2. AI BRAIN (WITH MEMORY)
   const processAiResponse = async (text) => {
     try {
+      // Add User Input to Memory
+      messages.push({ role: "user", content: text });
+
       const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "gpt-4o",
-          messages: [
-            { role: "system", content: "You are Mass Mechanic's voice assistant. Keep answers very short (1 sentence). Goal: Get Name and Issue." },
-            { role: "user", content: text }
-          ],
-          max_tokens: 60
+          messages: messages, // Send FULL history
+          max_tokens: 100
         })
       });
+
       const aiText = (await gpt.json()).choices[0].message.content;
       console.log(`🤖 AI: ${aiText}`);
 
-      // 3. GENERATE AUDIO (Direct to Mulaw 8000Hz)
+      // Add AI Reply to Memory (So it remembers what it asked!)
+      messages.push({ role: "assistant", content: aiText });
+
+      // 3. GENERATE AUDIO (Native Deepgram TTS)
       const ttsResponse = await fetch(`https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none`, {
         method: "POST",
         headers: { 
@@ -218,7 +231,6 @@ wss.on("connection", (ws) => {
     const data = JSON.parse(msg);
     if (data.event === "start") {
       streamSid = data.start.streamSid;
-      console.log("📞 Stream Started");
     } else if (data.event === "media" && deepgramLive?.readyState === WebSocket.OPEN) {
       deepgramLive.send(Buffer.from(data.media.payload, "base64"));
     } else if (data.event === "stop") {
