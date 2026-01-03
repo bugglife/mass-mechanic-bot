@@ -9,22 +9,20 @@ import { createClient } from "@supabase/supabase-js";
 // ───────────────────────────────────────────────────────────────────────────────
 // 1. CONFIGURATION
 // ───────────────────────────────────────────────────────────────────────────────
-const app = express();
+const app = express(); // <--- Create it ONCE here.
 const PORT = process.env.PORT || 10000;
 
 // SUPPORT BOTH JSON (Supabase) AND URL-ENCODED (Twilio Legacy)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-// ... existing imports ...
-const app = express();
-// ... existing app.use ...
 
-// --- ADD THIS HEALTH CHECK ROUTE ---
+// --- ADD THIS HEALTH CHECK ROUTE HERE ---
+// This is the "Welcome Page" for the Cron Job
 app.get('/', (req, res) => {
     res.send("Mass Mechanic Server is Awake 🤖");
 });
 
-// ... rest of your code ...
+// ... rest of your imports and code ...
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY; 
 const DG_KEY = process.env.DEEPGRAM_API_KEY;
