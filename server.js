@@ -3,15 +3,12 @@ import { createClient } from "@supabase/supabase-js";
 import twilio from "twilio";
 import WebSocket, { WebSocketServer } from "ws";
 import fetch from "node-fetch";
-import { spawn } from "child_process";
-import ffmpegPath from "@ffmpeg-installer/ffmpeg";
 
 // ───────────────────────────────────────────────────────────────────────────────
 // 1. CONFIGURATION & SETUP
 // ───────────────────────────────────────────────────────────────────────────────
 const app = express();
 const PORT = process.env.PORT || 10000;
-const ffmpeg = ffmpegPath.path;
 
 // Middleware
 app.use(express.json());
@@ -42,11 +39,10 @@ const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 app.get('/', (req, res) => res.send("Mass Mechanic Server is Awake 🤖"));
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 3. SMS WORKER (Router-Compatible)
+// 3. SMS WORKER
 // ───────────────────────────────────────────────────────────────────────────────
 async function extractAndDispatchLead(history, userPhone) {
     console.log("🧠 Processing Lead for Dispatch...");
-    // ... (Extraction Logic)
     const extractionPrompt = `Analyze extract lead details: name, car_year, car_make_model, zip_code, description, service_type, drivable (Yes/No), urgency_window (Today/Flexible). If drivable implies towing, set No.`;
 
     try {
@@ -124,7 +120,7 @@ app.post('/sms', async (req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────────
-// 4. VOICE SERVER (RESTORED WITH FFMEG)
+// 4. VOICE SERVER (NATIVE DEEPGRAM TTS - NO FFMPEG)
 // ───────────────────────────────────────────────────────────────────────────────
 
 app.post('/', (req, res) => {
@@ -150,6 +146,8 @@ wss.on("connection", (ws) => {
       headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
     });
     
+    deepgramLive.on("open", () => console.log("🟢 Deepgram Connected (Ready to Transcribe)"));
+    
     deepgramLive.on("message", (data) => {
       const received = JSON.parse(data);
       const transcript = received.channel?.alternatives[0]?.transcript;
@@ -164,7 +162,7 @@ wss.on("connection", (ws) => {
 
   setupDeepgram();
 
-  // 2. SETUP AUDIO PIPELINE (SPEAKER)
+  // 2. AI BRAIN & SPEAKING (NATIVE AUDIO)
   const processAiResponse = async (text) => {
     try {
       const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -173,7 +171,7 @@ wss.on("connection", (ws) => {
         body: JSON.stringify({
           model: "gpt-4o",
           messages: [
-            { role: "system", content: "You are Mass Mechanic's voice assistant. Keep answers very short (1 sentence). Goal: Get Name and Zip." },
+            { role: "system", content: "You are Mass Mechanic's voice assistant. Keep answers very short (1 sentence). Goal: Get Name and Issue." },
             { role: "user", content: text }
           ],
           max_tokens: 60
@@ -182,33 +180,30 @@ wss.on("connection", (ws) => {
       const aiText = (await gpt.json()).choices[0].message.content;
       console.log(`🤖 AI: ${aiText}`);
 
-      // TTS + CONVERSION
-      const tts = await fetch("https://api.openai.com/v1/audio/speech", {
+      // 3. GENERATE AUDIO (Direct to Mulaw 8000Hz)
+      const ttsResponse = await fetch(`https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "tts-1", input: aiText, voice: "alloy", response_format: "mp3" })
+        headers: { 
+          "Authorization": `Token ${DEEPGRAM_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ text: aiText })
       });
 
-      // Spawn FFmpeg to convert MP3 -> Mulaw 8k
-      const ffmpegProcess = spawn(ffmpeg, [
-        "-i", "pipe:0",           // Input from stdin (MP3)
-        "-f", "mulaw",            // Output format: mulaw
-        "-ar", "8000",            // Sample rate: 8000Hz
-        "-ac", "1",               // Channels: 1 (Mono)
-        "pipe:1"                  // Output to stdout
-      ]);
+      if (!ttsResponse.ok) throw new Error("TTS Failed");
 
-      ffmpegProcess.stdout.on("data", (chunk) => {
-        if (ws.readyState === WebSocket.OPEN && streamSid) {
-            const payload = chunk.toString("base64");
-            ws.send(JSON.stringify({ event: "media", streamSid, media: { payload } }));
-        }
-      });
-
-      // Pipe TTS audio into FFmpeg
-      const arrayBuffer = await tts.arrayBuffer();
-      ffmpegProcess.stdin.write(Buffer.from(arrayBuffer));
-      ffmpegProcess.stdin.end();
+      // Stream Audio Back to Twilio
+      const audioBuffer = await ttsResponse.arrayBuffer();
+      const base64Audio = Buffer.from(audioBuffer).toString("base64");
+      
+      if (ws.readyState === WebSocket.OPEN && streamSid) {
+          // Send in one chunk (simple & fast for short replies)
+          ws.send(JSON.stringify({ 
+              event: "media", 
+              streamSid, 
+              media: { payload: base64Audio } 
+          }));
+      }
 
     } catch (e) { console.error("AI/TTS Error:", e); }
   };
