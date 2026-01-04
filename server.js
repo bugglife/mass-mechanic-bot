@@ -119,21 +119,66 @@ app.post('/sms', async (req, res) => {
     } catch (error) { console.error("❌ SMS Error:", error); }
 });
 
-// ───────────────────────────────────────────────────────────────────────────────
-// 4. VOICE SERVER (WITH MEMORY & GREETING)
-// ───────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// 4. VOICE SERVER (STREAM + INSTANT GREETING)
+// ────────────────────────────────────────────────────────────
 
-app.post('/', (req, res) => {
+const VOICE_GREETING =
+  "Thanks for calling MassMechanic — we connect you with trusted local mechanics for fast, free repair quotes. " +
+  "Are you calling about a repair you need help with right now, or do you have a quick question?";
+
+function getStreamUrl(req) {
+  // Render / proxies often forward the real host here
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const proto = (req.headers["x-forwarded-proto"] || "https").includes("https") ? "wss" : "ws";
+  return `${proto}://${host}/`;
+}
+
+async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
+  // Deepgram TTS → mulaw 8k payload for Twilio Media Streams
+  const ttsResponse = await fetch(
+    "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Token ${deepgramKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ text }),
+    }
+  );
+
+  if (!ttsResponse.ok) {
+    const errText = await ttsResponse.text().catch(() => "");
+    console.error("❌ TTS Failed:", ttsResponse.status, errText);
+    return;
+  }
+
+  const audioBuffer = await ttsResponse.arrayBuffer();
+  const base64Audio = Buffer.from(audioBuffer).toString("base64");
+
+  if (ws.readyState === WebSocket.OPEN && streamSid) {
+    ws.send(
+      JSON.stringify({
+        event: "media",
+        streamSid,
+        media: { payload: base64Audio },
+      })
+    );
+  }
+}
+
+app.post("/", (req, res) => {
   res.type("text/xml");
-  // We use <Say> to break the ice immediately.
-  // Then <Pause> to give the user a split second to process before the connection opens.
+
+  // IMPORTANT: Don’t rely on <Say> for the first utterance.
+  // We speak immediately once the stream starts (WS "start" event).
+  const streamUrl = getStreamUrl(req);
+
   res.send(`
     <Response>
-      <Say voice="alice">Thanks for calling MassMechanic — we connect you with trusted local mechanics for fast, free repair quotes.</Say>
-      <Pause length="1"/>
-      <Say voice="alice">Are you calling about a repair you need help with right now, or do you have a quick question?</Say>
       <Connect>
-        <Stream url="wss://${req.headers.host}/" />
+        <Stream url="${streamUrl}" />
       </Connect>
     </Response>
   `);
@@ -148,95 +193,116 @@ server.on("upgrade", (req, socket, head) => {
 
 wss.on("connection", (ws) => {
   console.log("🔗 Voice Connected");
+
   let streamSid = null;
   let deepgramLive = null;
-  
+  let greeted = false;
+
   // --- MEMORY: Store the conversation context here ---
   let messages = [
-    { 
-      role: "system", 
-      content: "You are the helpful voice assistant for Mass Mechanic. You are speaking to a customer on the phone. Keep answers SHORT (1-2 sentences). Your goal is to get their Name, Zip Code, and Car Issue. Be friendly and natural." 
-    }
+    {
+      role: "system",
+      content:
+        "You are the MassMechanic phone agent. Keep answers SHORT (1–2 sentences). " +
+        "Your goal: collect Name, ZIP code, and the car issue. Be friendly and direct. " +
+        "The opening greeting has ALREADY been spoken to the caller, so do NOT repeat it. " +
+        "After the greeting, your next step is to ask ONE simple follow-up question based on what they say.",
+    },
+    // We’ll also insert the greeting as an assistant message once it’s spoken
   ];
 
-  // 1. SETUP DEEPGRAM (LISTENER)
+  // 1) SETUP DEEPGRAM (LISTENER)
   const setupDeepgram = () => {
-    deepgramLive = new WebSocket("wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&model=nova-2&smart_format=true", {
-      headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
-    });
-    
+    deepgramLive = new WebSocket(
+      "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&model=nova-2&smart_format=true",
+      { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
+    );
+
     deepgramLive.on("open", () => console.log("🟢 Deepgram Listening"));
-    
+
     deepgramLive.on("message", (data) => {
       const received = JSON.parse(data);
-      const transcript = received.channel?.alternatives[0]?.transcript;
+      const transcript = received.channel?.alternatives?.[0]?.transcript;
+
+      // Only react to real final speech
       if (transcript && received.is_final && transcript.trim().length > 0) {
         console.log(`🗣️ User: ${transcript}`);
         processAiResponse(transcript);
       }
     });
-    
+
     deepgramLive.on("error", (err) => console.error("DG Error:", err));
   };
 
   setupDeepgram();
 
-  // 2. AI BRAIN (WITH MEMORY)
+  // 2) AI BRAIN (WITH MEMORY)
   const processAiResponse = async (text) => {
     try {
-      // Add User Input to Memory
       messages.push({ role: "user", content: text });
 
       const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
-        headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           model: "gpt-4o",
-          messages: messages, // Send FULL history
-          max_tokens: 100
-        })
+          messages,
+          max_tokens: 120,
+        }),
       });
 
-      const aiText = (await gpt.json()).choices[0].message.content;
-      console.log(`🤖 AI: ${aiText}`);
+      const aiText = (await gpt.json()).choices[0].message.content?.trim();
+      if (!aiText) return;
 
-      // Add AI Reply to Memory (So it remembers what it asked!)
+      console.log(`🤖 AI: ${aiText}`);
       messages.push({ role: "assistant", content: aiText });
 
-      // 3. GENERATE AUDIO (Native Deepgram TTS)
-      const ttsResponse = await fetch(`https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none`, {
-        method: "POST",
-        headers: { 
-          "Authorization": `Token ${DEEPGRAM_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ text: aiText })
+      await speakOverStream({
+        ws,
+        streamSid,
+        text: aiText,
+        deepgramKey: DEEPGRAM_API_KEY,
       });
-
-      if (!ttsResponse.ok) throw new Error("TTS Failed");
-
-      const audioBuffer = await ttsResponse.arrayBuffer();
-      const base64Audio = Buffer.from(audioBuffer).toString("base64");
-      
-      if (ws.readyState === WebSocket.OPEN && streamSid) {
-          ws.send(JSON.stringify({ 
-              event: "media", 
-              streamSid, 
-              media: { payload: base64Audio } 
-          }));
-      }
-
-    } catch (e) { console.error("AI/TTS Error:", e); }
+    } catch (e) {
+      console.error("AI/TTS Error:", e);
+    }
   };
 
-  ws.on("message", (msg) => {
+  // 3) TWILIO STREAM HANDLER
+  ws.on("message", async (msg) => {
     const data = JSON.parse(msg);
+
     if (data.event === "start") {
       streamSid = data.start.streamSid;
-    } else if (data.event === "media" && deepgramLive?.readyState === WebSocket.OPEN) {
+
+      // 🔥 Speak immediately on start (so caller never hears silence)
+      if (!greeted) {
+        greeted = true;
+
+        // Add greeting to memory so the model stays aligned
+        messages.push({ role: "assistant", content: VOICE_GREETING });
+
+        await speakOverStream({
+          ws,
+          streamSid,
+          text: VOICE_GREETING,
+          deepgramKey: DEEPGRAM_API_KEY,
+        });
+      }
+      return;
+    }
+
+    if (data.event === "media" && deepgramLive?.readyState === WebSocket.OPEN) {
       deepgramLive.send(Buffer.from(data.media.payload, "base64"));
-    } else if (data.event === "stop") {
+      return;
+    }
+
+    if (data.event === "stop") {
       if (deepgramLive) deepgramLive.close();
+      return;
     }
   });
 });
