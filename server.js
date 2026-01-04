@@ -129,7 +129,9 @@ app.post('/', (req, res) => {
   // Then <Pause> to give the user a split second to process before the connection opens.
   res.send(`
     <Response>
-      <Say voice="alice">Thank you for calling Mass Mechanic. Please tell me your name and how I can help you today.</Say>
+      <Say voice="alice">Thanks for calling MassMechanic — we connect you with trusted local mechanics for fast, free repair quotes.</Say>
+      <Pause length="1"/>
+      <Say voice="alice">Are you calling about a repair you need help with right now, or do you have a quick question?</Say>
       <Connect>
         <Stream url="wss://${req.headers.host}/" />
       </Connect>
