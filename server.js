@@ -5,28 +5,19 @@ import WebSocket, { WebSocketServer } from "ws";
 import fetch from "node-fetch";
 
 // ───────────────────────────────────────────────────────────────────────────────
-// HELPERS
+// 0. HELPERS
 // ───────────────────────────────────────────────────────────────────────────────
 function normalizePhone(phone = "") {
   const digits = String(phone).replace(/\D/g, "");
   if (!digits) return "";
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
-  if (digits.startsWith("+")) return digits;
-  return `+${digits}`;
+  // If 10 digits, assume US and prefix 1
+  if (digits.length === 10) return `1${digits}`;
+  // If 11 digits and starts with 1, keep it
+  return digits;
 }
 
-function getBaseUrlFromReq(req) {
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
-  const proto = req.headers["x-forwarded-proto"] || "https";
-  return `${proto}://${host}`;
-}
-
-function getStreamUrl(req) {
-  // Render/proxies often forward the real host here
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
-  const proto = (req.headers["x-forwarded-proto"] || "https").includes("https") ? "wss" : "ws";
-  return `${proto}://${host}/`;
+function wantsHumanFromText(text = "") {
+  return /(operator|representative|human|real person|agent|someone|talk to a person|call me)/i.test(text);
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -48,29 +39,15 @@ const {
   TWILIO_PHONE_NUMBER,
   SUPABASE_URL,
   SUPABASE_KEY,
-  PUBLIC_BASE_URL,           // ✅ add: https://mass-mechanic-bot.onrender.com
-  ADMIN_ESCALATION_PHONE     // ✅ add: +16782003064
+
+  // NEW (set these in Render):
+  PUBLIC_BASE_URL,          // e.g. https://mass-mechanic-bot.onrender.com
+  ADMIN_ESCALATION_PHONE    // e.g. +16782003064
 } = process.env;
 
-if (
-  !OPENAI_API_KEY ||
-  !DEEPGRAM_API_KEY ||
-  !TWILIO_ACCOUNT_SID ||
-  !TWILIO_AUTH_TOKEN ||
-  !SUPABASE_URL ||
-  !SUPABASE_KEY ||
-  !TWILIO_PHONE_NUMBER
-) {
+if (!OPENAI_API_KEY || !DEEPGRAM_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
   console.error("❌ CRITICAL: Missing API Keys.");
   process.exit(1);
-}
-
-if (!PUBLIC_BASE_URL) {
-  console.warn("⚠️ PUBLIC_BASE_URL missing. Set it to https://mass-mechanic-bot.onrender.com for reliable transfers.");
-}
-
-if (!ADMIN_ESCALATION_PHONE) {
-  console.warn("⚠️ ADMIN_ESCALATION_PHONE missing. Escalation will not be able to transfer calls.");
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -86,7 +63,8 @@ app.get("/", (req, res) => res.send("Mass Mechanic Server is Awake 🤖"));
 // ───────────────────────────────────────────────────────────────────────────────
 async function extractAndDispatchLead(history, userPhone) {
   console.log("🧠 Processing Lead for Dispatch...");
-  const extractionPrompt = `Analyze extract lead details: name, car_year, car_make_model, zip_code, description, service_type, drivable (Yes/No), urgency_window (Today/Flexible). If drivable implies towing, set No.`;
+  const extractionPrompt =
+    `Analyze extract lead details: name, car_year, car_make_model, zip_code, description, service_type, drivable (Yes/No), urgency_window (Today/Flexible). If drivable implies towing, set No.`;
 
   try {
     const gptExtract = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -103,7 +81,7 @@ async function extractAndDispatchLead(history, userPhone) {
     });
 
     const extractData = await gptExtract.json();
-    const leadDetails = JSON.parse(extractData.choices?.[0]?.message?.content || "{}");
+    const leadDetails = JSON.parse(extractData.choices[0].message.content);
 
     const { data: insertedLead, error: insertError } = await supabase
       .from("leads")
@@ -137,13 +115,14 @@ async function extractAndDispatchLead(history, userPhone) {
 
 app.post("/sms", async (req, res) => {
   const incomingMsg = req.body.body || req.body.Body;
-  const fromNumberRaw = req.body.from || req.body.From;
-  const fromNumber = normalizePhone(fromNumberRaw);
+  const fromNumber = req.body.from || req.body.From;
 
   res.status(200).send("OK");
   if (!incomingMsg || !fromNumber) return;
 
-  const systemPrompt = `You are the Senior Service Advisor for Mass Mechanic. Qualify this lead. Gather: Name, Car, Zip, Issue, Drivability (Yes/No), Urgency (Today/Flexible). Rules: Check history first. Ask 1 question at a time. Once done say: "Perfect. I have sent your request to our network."`;
+  const systemPrompt =
+    `You are the Senior Service Advisor for Mass Mechanic. Qualify this lead. Gather: Name, Car, Zip, Issue, Drivability (Yes/No), Urgency (Today/Flexible).
+Rules: Check history first. Ask 1 question at a time. Once done say: "Perfect. I have sent your request to our network."`;
 
   try {
     const { data: history } = await supabase
@@ -165,16 +144,24 @@ app.post("/sms", async (req, res) => {
       })
     });
 
-    const replyText = (await gptResponse.json()).choices?.[0]?.message?.content || "";
+    const replyText = (await gptResponse.json()).choices[0].message.content;
+
     await supabase.from("sms_chat_history").insert([
       { phone: fromNumber, role: "user", content: incomingMsg },
       { phone: fromNumber, role: "assistant", content: replyText }
     ]);
 
-    await twilioClient.messages.create({ body: replyText, from: TWILIO_PHONE_NUMBER, to: fromNumber });
+    await twilioClient.messages.create({
+      body: replyText,
+      from: TWILIO_PHONE_NUMBER,
+      to: fromNumber
+    });
 
-    if (replyText.toLowerCase().includes("sent your request")) {
-      extractAndDispatchLead([...pastMessages, { role: "user", content: incomingMsg }, { role: "assistant", content: replyText }], fromNumber);
+    if (replyText.includes("sent your request")) {
+      extractAndDispatchLead(
+        [...pastMessages, { role: "user", content: incomingMsg }, { role: "assistant", content: replyText }],
+        fromNumber
+      );
     }
   } catch (error) {
     console.error("❌ SMS Error:", error);
@@ -182,61 +169,19 @@ app.post("/sms", async (req, res) => {
 });
 
 // ────────────────────────────────────────────────────────────
-// 4. VOICE SERVER (STREAM + INSTANT GREETING + SAFE TRANSFER)
+// 4. VOICE SERVER (STREAM + INSTANT GREETING + HUMAN ESCALATION)
 // ────────────────────────────────────────────────────────────
 
 const VOICE_GREETING =
   "Thanks for calling MassMechanic — we connect you with trusted local mechanics for fast, free repair quotes. " +
   "Are you calling about a repair you need help with right now, or do you have a quick question?";
 
-// ✅ Stable TwiML transfer endpoint (Twilio updates call → this URL)
-app.post("/transfer", (req, res) => {
-  res.type("text/xml");
-
-  if (!ADMIN_ESCALATION_PHONE) {
-    return res.send(`<Response><Say>Sorry, we cannot connect you right now.</Say></Response>`);
-  }
-
-  res.send(`
-    <Response>
-      <Say>Connecting you now.</Say>
-      <Dial>${ADMIN_ESCALATION_PHONE}</Dial>
-    </Response>
-  `);
-});
-
-async function transferCallToHuman(callSid) {
-  if (!callSid) return;
-  if (!PUBLIC_BASE_URL) {
-    console.error("❌ PUBLIC_BASE_URL is missing — cannot transfer reliably.");
-    return;
-  }
-
-  try {
-    await twilioClient.calls(callSid).update({
-      method: "POST",
-      url: `${PUBLIC_BASE_URL}/transfer`
-    });
-  } catch (e) {
-    console.error("❌ Twilio transfer failed:", e);
-  }
-}
-
-async function sendEscalationSummary({ phone, channel, trigger, last_message }) {
-  try {
-    // Best-guess payload. If your edge function expects different keys,
-    // this is the only place you need to tweak.
-    await supabase.functions.invoke("send-escalation-summary", {
-      body: {
-        phone,
-        channel,
-        trigger,
-        last_message
-      }
-    });
-  } catch (e) {
-    console.error("❌ send-escalation-summary failed:", e);
-  }
+function getStreamUrl(req) {
+  // Render/proxies forward host/proto
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const xfProto = req.headers["x-forwarded-proto"] || "https";
+  const proto = String(xfProto).includes("https") ? "wss" : "ws";
+  return `${proto}://${host}/`;
 }
 
 async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
@@ -262,18 +207,49 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
   const base64Audio = Buffer.from(audioBuffer).toString("base64");
 
   if (ws.readyState === WebSocket.OPEN && streamSid) {
-    ws.send(
-      JSON.stringify({
-        event: "media",
-        streamSid,
-        media: { payload: base64Audio }
-      })
-    );
+    ws.send(JSON.stringify({ event: "media", streamSid, media: { payload: base64Audio } }));
   }
 }
 
+async function sendVoiceEscalationSummary({ callerPhone, trigger, lastMessage }) {
+  try {
+    await supabase.functions.invoke("send-escalation-summary", {
+      body: {
+        phone: callerPhone,
+        channel: "voice",
+        trigger,
+        last_message: lastMessage
+      }
+    });
+    console.log("✅ Escalation summary invoked");
+  } catch (e) {
+    console.error("❌ send-escalation-summary failed:", e);
+  }
+}
+
+async function transferCallToHuman(callSid) {
+  if (!ADMIN_ESCALATION_PHONE) {
+    console.error("❌ Missing ADMIN_ESCALATION_PHONE env var");
+    return;
+  }
+  if (!callSid) {
+    console.error("❌ Missing callSid — cannot transfer");
+    return;
+  }
+
+  const baseUrl = PUBLIC_BASE_URL || "https://mass-mechanic-bot.onrender.com";
+  const transferUrl = `${baseUrl}/transfer`;
+
+  await twilioClient.calls(callSid).update({
+    url: transferUrl,
+    method: "POST"
+  });
+
+  console.log("📞 Call transfer initiated", { callSid, transferUrl });
+}
+
 // ✅ Voice webhook TwiML — passes From/Caller/CallSid into stream
-app.post("/", (req, res) => {
+app.post("/voice", (req, res) => {
   res.type("text/xml");
 
   const streamUrl = getStreamUrl(req);
@@ -294,6 +270,36 @@ app.post("/", (req, res) => {
   `);
 });
 
+// ✅ Transfer TwiML endpoint (prevents 11200)
+app.post("/transfer", (req, res) => {
+  res.type("text/xml");
+
+  if (!ADMIN_ESCALATION_PHONE) {
+    return res.send(`
+      <Response>
+        <Say>Sorry, no operator is available right now.</Say>
+        <Hangup/>
+      </Response>
+    `);
+  }
+
+  return res.send(`
+    <Response>
+      <Say>Connecting you now.</Say>
+      <Dial timeout="25" answerOnBridge="true">${ADMIN_ESCALATION_PHONE}</Dial>
+      <Say>Sorry — nobody answered. Please text us and we will follow up.</Say>
+      <Hangup/>
+    </Response>
+  `);
+});
+
+// NOTE: keep your old "/" if you want as a web health page,
+// but Twilio voice webhook should point to /voice now.
+
+// ────────────────────────────────────────────────────────────
+// 5. WEBSOCKET SERVER FOR TWILIO MEDIA STREAMS
+// ────────────────────────────────────────────────────────────
+
 const server = app.listen(PORT, () => console.log(`✅ MassMechanic Running on ${PORT}`));
 const wss = new WebSocketServer({ noServer: true });
 
@@ -305,12 +311,13 @@ wss.on("connection", (ws) => {
   console.log("🔗 Voice Connected");
 
   let streamSid = null;
-  let callSid = null;
-  let callerPhone = "unknown";
   let deepgramLive = null;
-
   let greeted = false;
-  let escalated = false; // ✅ one-time escalation guard
+
+  let callerPhone = "unknown";
+  let callSid = "";
+
+  let transferred = false;
 
   // --- MEMORY ---
   let messages = [
@@ -320,7 +327,7 @@ wss.on("connection", (ws) => {
         "You are the MassMechanic phone agent. Keep answers SHORT (1–2 sentences). " +
         "Your goal: collect Name, ZIP code, and the car issue. Be friendly and direct. " +
         "The opening greeting has ALREADY been spoken to the caller, so do NOT repeat it. " +
-        "After the greeting, ask ONE simple follow-up question based on what they say."
+        "Ask ONE follow-up question at a time."
     }
   ];
 
@@ -334,12 +341,14 @@ wss.on("connection", (ws) => {
     deepgramLive.on("open", () => console.log("🟢 Deepgram Listening"));
 
     deepgramLive.on("message", (data) => {
+      if (transferred) return;
+
       const received = JSON.parse(data);
       const transcript = received.channel?.alternatives?.[0]?.transcript;
 
       if (transcript && received.is_final && transcript.trim().length > 0) {
         console.log(`🗣️ User: ${transcript}`);
-        handleVoiceText(transcript);
+        processAiResponse(transcript);
       }
     });
 
@@ -348,51 +357,45 @@ wss.on("connection", (ws) => {
 
   setupDeepgram();
 
-  // 2) HANDLE VOICE TEXT (routing + escalation)
-  const handleVoiceText = async (text) => {
-    const lower = text.toLowerCase();
-
-    // ✅ Human request detection (simple + effective)
-    const wantsHuman =
-      lower.includes("operator") ||
-      lower.includes("representative") ||
-      lower.includes("human") ||
-      lower.includes("agent") ||
-      lower.includes("someone") ||
-      lower.includes("talk to a person");
-
-    if (wantsHuman && !escalated) {
-      escalated = true;
-
-      // Send escalation summary to your admin SMS (via Supabase edge)
-      await sendEscalationSummary({
-        phone: callerPhone,
-        channel: "voice",
-        trigger: "REQUESTED_HUMAN",
-        last_message: text
-      });
-
-      // Transfer call to human
-      await transferCallToHuman(callSid);
-
-      return;
-    }
-
-    // Normal AI flow
-    await processAiResponse(text);
-  };
-
-  // 3) AI BRAIN (WITH MEMORY)
+  // 2) AI BRAIN (WITH MEMORY)
   const processAiResponse = async (text) => {
     try {
+      if (transferred) return;
+
+      // Human request escalation
+      if (wantsHumanFromText(text)) {
+        transferred = true;
+        console.log("🚨 Human requested — escalating", { callSid, callerPhone, text });
+
+        // Send you escalation SMS summary (idempotent on Supabase side)
+        await sendVoiceEscalationSummary({
+          callerPhone,
+          trigger: "REQUESTED_HUMAN",
+          lastMessage: text
+        });
+
+        // Optional: tell caller we are connecting them (helps UX)
+        await speakOverStream({
+          ws,
+          streamSid,
+          text: "Got it — connecting you to an operator now.",
+          deepgramKey: DEEPGRAM_API_KEY
+        });
+
+        // Transfer live call
+        await transferCallToHuman(callSid);
+
+        // Stop AI from continuing to speak
+        try { if (deepgramLive) deepgramLive.close(); } catch {}
+        try { ws.close(); } catch {}
+        return;
+      }
+
       messages.push({ role: "user", content: text });
 
       const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        },
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "gpt-4o",
           messages,
@@ -417,20 +420,22 @@ wss.on("connection", (ws) => {
     }
   };
 
-  // 4) TWILIO STREAM HANDLER
+  // 3) TWILIO STREAM HANDLER
   ws.on("message", async (msg) => {
     const data = JSON.parse(msg);
 
     if (data.event === "start") {
       streamSid = data.start.streamSid;
 
-      // ✅ Pull our custom params reliably
+      // ✅ Pull custom params reliably
       const params = data.start?.customParameters || {};
       const pFrom = normalizePhone(params.from || "");
       const pCaller = normalizePhone(params.caller || "");
       callerPhone = pFrom || pCaller || "unknown";
 
       callSid = params.callSid || data.start.callSid || callSid;
+
+      console.log("☎️ Stream start", { streamSid, callSid, callerPhone });
 
       // 🔥 Speak immediately on start (no silence)
       if (!greeted) {
@@ -459,6 +464,6 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    if (deepgramLive) deepgramLive.close();
+    try { if (deepgramLive) deepgramLive.close(); } catch {}
   });
 });
