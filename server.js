@@ -18,9 +18,61 @@ function wantsHumanFromText(text = "") {
   return /(operator|representative|human|real person|agent|someone|talk to a person|call me)/i.test(text);
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+function looksLikeYes(text = "") {
+  return /^(yes|yeah|yep|correct|right|that’s right|thats right|affirmative|sure|ok|okay)\b/i.test(text.trim());
 }
+
+function looksLikeNo(text = "") {
+  return /^(no|nope|not really|wrong|incorrect)\b/i.test(text.trim());
+}
+
+// Basic extraction helpers (not perfect, but useful)
+function extractZip(text = "") {
+  const m = text.match(/\b(\d{5})(?:-\d{4})?\b/);
+  return m ? m[1] : "";
+}
+
+function extractName(text = "") {
+  // naive: “Tom”, “Tommy”, “John Smith”, “My name is ___”
+  const m = text.match(/\b(my name is|this is|i'm|im)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)\b/i);
+  if (m?.[2]) return m[2].trim();
+  if (/^[A-Za-z]{2,}(?:\s+[A-Za-z]{2,})?$/.test(text.trim()) && text.trim().length <= 20) {
+    return text.trim();
+  }
+  return "";
+}
+
+// Issue routing (keyword-based; tune freely)
+function categorizeIssue(text = "") {
+  const t = text.toLowerCase();
+
+  // safety/driveability
+  if (/(won't start|wont start|no start|clicking|starter|dead battery|jump start)/i.test(t)) return "no_start";
+  if (/(overheat|overheating|temperature gauge|coolant|radiator|steam)/i.test(t)) return "overheating";
+  if (/(brake|grind|squeal|squeak|pedal|rotor)/i.test(t)) return "brakes";
+  if (/(pulls to the (right|left)|pulling|alignment|steering wheel|drifts)/i.test(t)) return "pulling_alignment";
+  if (/(check engine|cel|engine light|code|misfire|rough idle)/i.test(t)) return "check_engine";
+  if (/(transmission|slipping|hard shift|won't shift|gear)/i.test(t)) return "transmission";
+  if (/(ac|a\/c|air conditioner|no cold|blowing warm)/i.test(t)) return "ac";
+  if (/(battery|alternator|charging|lights dim|electrical)/i.test(t)) return "electrical";
+  if (/(noise|rattle|clunk|knock)/i.test(t)) return "noise";
+  if (/(flat tire|tire|puncture|blowout)/i.test(t)) return "tire";
+  return "general";
+}
+
+const FOLLOWUP_BY_CATEGORY = {
+  brakes: "Got it. Are you hearing squeaking or grinding, and does it happen only when braking or all the time?",
+  pulling_alignment: "When it pulls, is it mostly at higher speeds, and does the steering wheel shake or feel off-center?",
+  no_start: "When you turn the key, do you hear a click, a crank, or nothing at all? And are the dash lights on?",
+  overheating: "Has the temp gauge gone into the red or have you seen steam/coolant leaks? How long into driving does it happen?",
+  check_engine: "Is the car running rough, shaking, or losing power? And is the light flashing or solid?",
+  transmission: "Is it slipping, shifting hard, or refusing to go into gear? Any warning lights?",
+  ac: "Is it blowing warm air constantly or only at idle? Any unusual noises when AC is on?",
+  electrical: "Are you seeing dimming lights, battery warning, or intermittent power issues? When did it start?",
+  noise: "Is the noise more like a clunk/knock/rattle, and does it happen over bumps, turning, or accelerating?",
+  tire: "Is the tire flat right now, or losing air slowly? Do you know the tire size or vehicle model?",
+  general: "Got it. What’s the make/model and roughly when did the issue start?"
+};
 
 // ───────────────────────────────────────────────────────────────────────────────
 // 1. CONFIGURATION & SETUP
@@ -39,20 +91,11 @@ const {
   TWILIO_PHONE_NUMBER,
   SUPABASE_URL,
   SUPABASE_KEY,
-
-  // NEW (set in Render):
-  PUBLIC_BASE_URL,          // e.g. https://mass-mechanic-bot.onrender.com
-  ADMIN_ESCALATION_PHONE    // e.g. +16782003064
+  PUBLIC_BASE_URL,
+  ADMIN_ESCALATION_PHONE
 } = process.env;
 
-if (
-  !OPENAI_API_KEY ||
-  !DEEPGRAM_API_KEY ||
-  !TWILIO_ACCOUNT_SID ||
-  !TWILIO_AUTH_TOKEN ||
-  !SUPABASE_URL ||
-  !SUPABASE_KEY
-) {
+if (!OPENAI_API_KEY || !DEEPGRAM_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
   console.error("❌ CRITICAL: Missing API Keys.");
   process.exit(1);
 }
@@ -65,119 +108,8 @@ const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 // ───────────────────────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("Mass Mechanic Server is Awake 🤖"));
 
-// ───────────────────────────────────────────────────────────────────────────────
-// 3. SMS WORKER (Service Advisor) — unchanged
-// ───────────────────────────────────────────────────────────────────────────────
-async function extractAndDispatchLead(history, userPhone) {
-  console.log("🧠 Processing Lead for Dispatch...");
-  const extractionPrompt =
-    `Analyze extract lead details: name, car_year, car_make_model, zip_code, description, service_type, drivable (Yes/No), urgency_window (Today/Flexible). If drivable implies towing, set No.`;
-
-  try {
-    const gptExtract = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        messages: [
-          { role: "system", content: extractionPrompt },
-          { role: "user", content: JSON.stringify(history) }
-        ],
-        response_format: { type: "json_object" }
-      })
-    });
-
-    const extractData = await gptExtract.json();
-    const leadDetails = JSON.parse(extractData.choices[0].message.content);
-
-    const { data: insertedLead, error: insertError } = await supabase
-      .from("leads")
-      .insert({
-        phone: userPhone,
-        source: "sms_bot",
-        name: leadDetails.name || "SMS User",
-        car_year: leadDetails.car_year,
-        car_make_model: leadDetails.car_make_model,
-        zip_code: leadDetails.zip_code,
-        description: leadDetails.description,
-        service_type: leadDetails.service_type || "other",
-        drivable: leadDetails.drivable || "Not sure",
-        urgency_window: leadDetails.urgency_window || "Flexible"
-      })
-      .select()
-      .single();
-
-    if (insertError) throw insertError;
-
-    const maintenanceServices = ["oil-change", "state-inspection", "tune-up", "tire-rotation"];
-    if (maintenanceServices.includes(leadDetails.service_type)) {
-      await supabase.functions.invoke("send-maintenance-lead-to-mechanics", { body: { lead_id: insertedLead.id } });
-    } else {
-      await supabase.functions.invoke("send-lead-to-mechanics", { body: { lead_id: insertedLead.id } });
-    }
-  } catch (e) {
-    console.error("❌ Dispatch Failed:", e);
-  }
-}
-
-app.post("/sms", async (req, res) => {
-  const incomingMsg = req.body.body || req.body.Body;
-  const fromNumber = req.body.from || req.body.From;
-
-  res.status(200).send("OK");
-  if (!incomingMsg || !fromNumber) return;
-
-  const systemPrompt =
-    `You are the Senior Service Advisor for Mass Mechanic. Qualify this lead. Gather: Name, Car, Zip, Issue, Drivability (Yes/No), Urgency (Today/Flexible).
-Rules: Check history first. Ask 1 question at a time. Once done say: "Perfect. I have sent your request to our network."`;
-
-  try {
-    const { data: history } = await supabase
-      .from("sms_chat_history")
-      .select("role, content")
-      .eq("phone", fromNumber)
-      .order("created_at", { ascending: true })
-      .limit(12);
-
-    const pastMessages = (history || []).map((msg) => ({ role: msg.role, content: msg.content }));
-
-    const gptResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        messages: [{ role: "system", content: systemPrompt }, ...pastMessages, { role: "user", content: incomingMsg }],
-        max_tokens: 200
-      })
-    });
-
-    const replyJson = await gptResponse.json();
-    const replyText = replyJson?.choices?.[0]?.message?.content;
-
-    await supabase.from("sms_chat_history").insert([
-      { phone: fromNumber, role: "user", content: incomingMsg },
-      { phone: fromNumber, role: "assistant", content: replyText }
-    ]);
-
-    await twilioClient.messages.create({
-      body: replyText,
-      from: TWILIO_PHONE_NUMBER,
-      to: fromNumber
-    });
-
-    if (replyText?.includes("sent your request")) {
-      extractAndDispatchLead(
-        [...pastMessages, { role: "user", content: incomingMsg }, { role: "assistant", content: replyText }],
-        fromNumber
-      );
-    }
-  } catch (error) {
-    console.error("❌ SMS Error:", error);
-  }
-});
-
 // ────────────────────────────────────────────────────────────
-// 4. VOICE SERVER (STREAM + INSTANT GREETING + HUMAN ESCALATION)
+// 4. VOICE SERVER (STREAM + BETTER ROUTING + CONFIRMATION HOOK)
 // ────────────────────────────────────────────────────────────
 
 const VOICE_GREETING =
@@ -188,13 +120,9 @@ function getStreamUrl(req) {
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   const xfProto = req.headers["x-forwarded-proto"] || "https";
   const proto = String(xfProto).includes("https") ? "wss" : "ws";
-  return `${proto}://${host}/`; // websocket upgrade path
+  return `${proto}://${host}/`;
 }
 
-/**
- * ✅ FIXED: Stream audio back to Twilio in 20ms frames.
- * mulaw 8k: 8000 bytes/sec => 20ms = 160 bytes
- */
 async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
   const ttsResponse = await fetch(
     "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none",
@@ -214,32 +142,18 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
     return;
   }
 
-  const audio = Buffer.from(await ttsResponse.arrayBuffer());
-  if (ws.readyState !== WebSocket.OPEN || !streamSid) return;
+  const audioBuffer = await ttsResponse.arrayBuffer();
+  const base64Audio = Buffer.from(audioBuffer).toString("base64");
 
-  const FRAME_SIZE = 160; // 20ms
-  for (let i = 0; i < audio.length; i += FRAME_SIZE) {
-    const chunk = audio.subarray(i, i + FRAME_SIZE);
-    ws.send(
-      JSON.stringify({
-        event: "media",
-        streamSid,
-        media: { payload: chunk.toString("base64") }
-      })
-    );
-    await sleep(20);
+  if (ws.readyState === WebSocket.OPEN && streamSid) {
+    ws.send(JSON.stringify({ event: "media", streamSid, media: { payload: base64Audio } }));
   }
 }
 
 async function sendVoiceEscalationSummary({ callerPhone, trigger, lastMessage }) {
   try {
     await supabase.functions.invoke("send-escalation-summary", {
-      body: {
-        phone: callerPhone,
-        channel: "voice",
-        trigger,
-        last_message: lastMessage
-      }
+      body: { phone: callerPhone, channel: "voice", trigger, last_message: lastMessage }
     });
     console.log("✅ Escalation summary invoked");
   } catch (e) {
@@ -248,27 +162,16 @@ async function sendVoiceEscalationSummary({ callerPhone, trigger, lastMessage })
 }
 
 async function transferCallToHuman(callSid) {
-  if (!ADMIN_ESCALATION_PHONE) {
-    console.error("❌ Missing ADMIN_ESCALATION_PHONE env var");
-    return;
-  }
-  if (!callSid) {
-    console.error("❌ Missing callSid — cannot transfer");
-    return;
-  }
+  if (!ADMIN_ESCALATION_PHONE) return console.error("❌ Missing ADMIN_ESCALATION_PHONE env var");
+  if (!callSid) return console.error("❌ Missing callSid — cannot transfer");
 
-  const baseUrl = (PUBLIC_BASE_URL || "https://mass-mechanic-bot.onrender.com").replace(/\/$/, "");
+  const baseUrl = PUBLIC_BASE_URL || "https://mass-mechanic-bot.onrender.com";
   const transferUrl = `${baseUrl}/transfer`;
 
-  await twilioClient.calls(callSid).update({
-    url: transferUrl,
-    method: "POST"
-  });
-
+  await twilioClient.calls(callSid).update({ url: transferUrl, method: "POST" });
   console.log("📞 Call transfer initiated", { callSid, transferUrl });
 }
 
-// ✅ Voice webhook TwiML — passes From/Caller/CallSid into stream
 app.post("/voice", (req, res) => {
   res.type("text/xml");
 
@@ -290,7 +193,6 @@ app.post("/voice", (req, res) => {
   `);
 });
 
-// ✅ Transfer TwiML endpoint (prevents 11200)
 app.post("/transfer", (req, res) => {
   res.type("text/xml");
 
@@ -325,7 +227,7 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 wss.on("connection", (ws) => {
-  console.log("🔗 Voice Connected (WS)");
+  console.log("🔗 Voice Connected");
 
   let streamSid = null;
   let deepgramLive = null;
@@ -335,17 +237,27 @@ wss.on("connection", (ws) => {
   let callSid = "";
   let transferred = false;
 
-  // prevents overlapping/stacked speech if user talks rapidly
-  let busy = false;
+  // Conversation state (guardrails + confirmation)
+  const state = {
+    name: "",
+    zip: "",
+    issueText: "",
+    issueCategory: "general",
+    askedFollowup: false,
+    awaitingConfirmation: false,
+    confirmed: false
+  };
 
   let messages = [
     {
       role: "system",
       content:
         "You are the MassMechanic phone agent. Keep answers SHORT (1–2 sentences). " +
-        "Your goal: collect Name, ZIP code, and the car issue. Be friendly and direct. " +
-        "The opening greeting has ALREADY been spoken to the caller, so do NOT repeat it. " +
-        "Ask ONE follow-up question at a time."
+        "Goal: collect Name, ZIP, and the car issue. Ask ONE question at a time. " +
+        "IMPORTANT: Do NOT end the call until you have CONFIRMED: Name + ZIP + Issue. " +
+        "Before closing, ask: 'To confirm, you're in ZIP ___ and the issue is ___ — is that right?' " +
+        "If the user says yes, close politely. If no, correct details and re-confirm. " +
+        "The opening greeting has ALREADY been spoken, so do NOT repeat it."
     }
   ];
 
@@ -374,13 +286,16 @@ wss.on("connection", (ws) => {
 
   setupDeepgram();
 
-  const processAiResponse = async (text) => {
-    if (transferred) return;
-    if (busy) return; // simple guard; keeps it stable
-    busy = true;
+  // Helper: decide if we can confirm
+  function readyToConfirm() {
+    return Boolean(state.name && state.zip && state.issueText);
+  }
 
+  const processAiResponse = async (text) => {
     try {
-      // Human request escalation
+      if (transferred) return;
+
+      // Human escalation
       if (wantsHumanFromText(text)) {
         transferred = true;
         console.log("🚨 Human requested — escalating", { callSid, callerPhone, text });
@@ -405,25 +320,93 @@ wss.on("connection", (ws) => {
         return;
       }
 
+      // Lightweight extraction from user input (adds stability)
+      if (!state.zip) {
+        const z = extractZip(text);
+        if (z) state.zip = z;
+      }
+      if (!state.name) {
+        const n = extractName(text);
+        if (n) state.name = n;
+      }
+      if (!state.issueText && text.length > 6) {
+        // don't overwrite issueText once set
+        // heuristically capture issue when user describes it (not when they say "Tom")
+        if (!extractZip(text) && !extractName(text)) {
+          state.issueText = text.trim();
+          state.issueCategory = categorizeIssue(state.issueText);
+        }
+      }
+
+      // If we’re awaiting confirmation, interpret yes/no
+      if (state.awaitingConfirmation && !state.confirmed) {
+        if (looksLikeYes(text)) {
+          state.confirmed = true;
+          state.awaitingConfirmation = false;
+
+          const closing = `Perfect — thanks ${state.name || ""}. We’ll connect you with a local mechanic near ${state.zip}.`;
+          messages.push({ role: "assistant", content: closing });
+          await speakOverStream({ ws, streamSid, text: closing, deepgramKey: DEEPGRAM_API_KEY });
+          return;
+        }
+
+        if (looksLikeNo(text)) {
+          state.awaitingConfirmation = false;
+          const fix = "No problem — what should I correct: your ZIP code, your name, or the issue?";
+          messages.push({ role: "assistant", content: fix });
+          await speakOverStream({ ws, streamSid, text: fix, deepgramKey: DEEPGRAM_API_KEY });
+          return;
+        }
+        // if unclear, fall through to GPT
+      }
+
       messages.push({ role: "user", content: text });
 
-      console.log("🧠 Sending to OpenAI:", text);
+      // Deterministic follow-up: if we captured an issue and haven’t asked the category follow-up yet
+      if (state.issueText && !state.askedFollowup) {
+        state.askedFollowup = true;
+        const followup = FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general;
+        messages.push({ role: "assistant", content: followup });
+        await speakOverStream({ ws, streamSid, text: followup, deepgramKey: DEEPGRAM_API_KEY });
+        return;
+      }
 
-      const gptRes = await fetch("https://api.openai.com/v1/chat/completions", {
+      // Force confirmation when ready, before GPT can “wrap up”
+      if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
+        state.awaitingConfirmation = true;
+        const confirmLine = `To confirm, you're in ZIP ${state.zip} and the issue is: "${state.issueText}". Is that right?`;
+        messages.push({ role: "assistant", content: confirmLine });
+        await speakOverStream({ ws, streamSid, text: confirmLine, deepgramKey: DEEPGRAM_API_KEY });
+        return;
+      }
+
+      // Otherwise, use GPT to continue the dialog
+      const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "gpt-4o",
-          messages,
+          messages: [
+            ...messages,
+            {
+              role: "system",
+              content:
+                `Context (internal): name="${state.name}", zip="${state.zip}", issue_category="${state.issueCategory}", ` +
+                `issue_text="${state.issueText}", askedFollowup=${state.askedFollowup}, awaitingConfirmation=${state.awaitingConfirmation}. ` +
+                `Ask ONE short question that helps you collect missing details.`
+            }
+          ],
           max_tokens: 120
         })
       });
 
-      const gptJson = await gptRes.json();
-      const aiText = gptJson?.choices?.[0]?.message?.content?.trim();
+      const gptJson = await gpt.json();
 
+      // Guardrail: handle quota/rate limit cleanly
+      const aiText = gptJson?.choices?.[0]?.message?.content?.trim();
       if (!aiText) {
-        console.error("❌ OpenAI returned no text:", JSON.stringify(gptJson).slice(0, 500));
+        const fallback = "I’m having a quick technical issue. Please text us your ZIP and what’s going on, and we’ll follow up right away.";
+        await speakOverStream({ ws, streamSid, text: fallback, deepgramKey: DEEPGRAM_API_KEY });
         return;
       }
 
@@ -438,8 +421,6 @@ wss.on("connection", (ws) => {
       });
     } catch (e) {
       console.error("AI/TTS Error:", e);
-    } finally {
-      busy = false;
     }
   };
 
@@ -448,12 +429,10 @@ wss.on("connection", (ws) => {
 
     if (data.event === "start") {
       streamSid = data.start.streamSid;
-
       const params = data.start?.customParameters || {};
       const pFrom = normalizePhone(params.from || "");
       const pCaller = normalizePhone(params.caller || "");
       callerPhone = pFrom || pCaller || "unknown";
-
       callSid = params.callSid || data.start.callSid || callSid;
 
       console.log("☎️ Stream start", { streamSid, callSid, callerPhone });
