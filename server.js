@@ -68,7 +68,7 @@ function extractName(text = "") {
   if (words.length === 1 && words[0].length >= 2 && words[0].length <= 15) {
     const word = words[0];
     // Much longer exclusion list
-    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke)$/i.test(word)) {
+    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke|code|zip)$/i.test(word)) {
       return word;
     }
   }
@@ -76,7 +76,7 @@ function extractName(text = "") {
   // Two words - take the first (likely first name) - but be very strict
   if (words.length === 2 && words[0].length >= 2 && words[0].length <= 15) {
     const word = words[0];
-    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke)$/i.test(word)) {
+    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke|code|zip)$/i.test(word)) {
       return word;
     }
   }
@@ -463,6 +463,8 @@ wss.on("connection", (ws) => {
     askedFollowup: false,
     awaitingFollowupResponse: false,
     awaitingConfirmation: false,
+    awaitingCorrectionChoice: false, // NEW: waiting for user to say what to correct
+    correctingField: null, // NEW: which field we're correcting (zip, name, car, issue)
     confirmed: false,
     carMakeModel: "",
     carYear: "",
@@ -607,6 +609,52 @@ wss.on("connection", (ws) => {
         return;
       }
       
+      // Handle correction choice (user telling us what to fix)
+      if (state.awaitingCorrectionChoice) {
+        const lower = text.toLowerCase();
+        
+        if (/(zip|zip code|zipcode)/i.test(lower)) {
+          state.correctingField = "zip";
+          state.zip = ""; // Clear the field
+          state.currentStep = "zip";
+          state.awaitingCorrectionChoice = false;
+          await say("Okay, what's your 5-digit ZIP code?");
+          return;
+        }
+        
+        if (/(name|first name)/i.test(lower)) {
+          state.correctingField = "name";
+          state.name = ""; // Clear the field
+          state.currentStep = "name";
+          state.awaitingCorrectionChoice = false;
+          await say("Okay, what's your first name?");
+          return;
+        }
+        
+        if (/(car|vehicle|make|model)/i.test(lower)) {
+          state.correctingField = "car";
+          state.carMakeModel = ""; // Clear the field
+          state.carYear = ""; // Also clear year
+          state.currentStep = "car";
+          state.awaitingCorrectionChoice = false;
+          await say("Okay, what's the make and model of your car?");
+          return;
+        }
+        
+        if (/(issue|problem|wrong)/i.test(lower)) {
+          state.correctingField = "issue";
+          state.issueText = ""; // Clear the field
+          state.currentStep = "issue";
+          state.awaitingCorrectionChoice = false;
+          await say("Okay, tell me what's wrong with your car.");
+          return;
+        }
+        
+        // If unclear, ask again
+        await say("Sorry, I didn't catch that. Would you like to correct your ZIP code, your name, the car, or the issue?");
+        return;
+      }
+      
       // If awaiting followup response, prioritize capturing that
       if (state.awaitingFollowupResponse) {
         // User is responding to our detailed follow-up question
@@ -626,6 +674,7 @@ wss.on("connection", (ws) => {
         const z = extractZip(text);
         if (z) {
           state.zip = z;
+          state.correctingField = null; // Done correcting
           console.log(`✅ Extracted ZIP: ${z}`);
         }
       }
@@ -635,6 +684,7 @@ wss.on("connection", (ws) => {
         const n = extractName(text);
         if (n) {
           state.name = n;
+          state.correctingField = null; // Done correcting
           console.log(`✅ Extracted name: ${n}`);
         }
       }
@@ -653,6 +703,7 @@ wss.on("connection", (ws) => {
           const mm = extractCarMakeModel(text);
           if (mm) {
             state.carMakeModel = mm;
+            state.correctingField = null; // Done correcting
             console.log(`✅ Extracted car: ${mm}`);
           }
         }
@@ -667,6 +718,7 @@ wss.on("connection", (ws) => {
         if (!z && !n && text.length > 6) {
           state.issueText = text;
           state.issueCategory = categorizeIssue(text);
+          state.correctingField = null; // Done correcting
           console.log(`✅ Captured issue: ${text} (category: ${state.issueCategory})`);
         }
       }
@@ -710,13 +762,14 @@ wss.on("connection", (ws) => {
         
         if (looksLikeNo(text)) {
           state.awaitingConfirmation = false;
+          state.awaitingCorrectionChoice = true; // NEW: Set flag to wait for correction choice
           await say("No problem — what should I correct: your ZIP code, your name, the car, or the issue?");
           return;
         }
         
-        // If unclear response during confirmation, try to extract corrections
-        // then fall through to normal flow
-        state.awaitingConfirmation = false;
+        // If unclear response during confirmation, ask again
+        await say("Sorry, I didn't catch that. Is that information correct?");
+        return;
       }
       
       // UPDATED FLOW ORDER: issue -> followup -> car -> name -> zip -> confirm
@@ -759,7 +812,7 @@ wss.on("connection", (ws) => {
         return;
       }
       
-      // Step 6: Confirmation
+      // Step 6: Confirmation (or re-confirmation after correction)
       if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
         state.awaitingConfirmation = true;
         state.currentStep = "confirm";
