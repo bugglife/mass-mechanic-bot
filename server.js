@@ -288,6 +288,8 @@ async function createLeadAndDispatch({ callerPhone, name, zip, issueText, issueC
     phone: phoneDigits || null,
     email: null,
 
+    car_make_model: carMakeModel, // ✅ REQUIRED FIELD
+    
     lead_source: "voice",
     lead_category: "repair",
     status: "new",
