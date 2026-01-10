@@ -89,8 +89,16 @@ function extractCarMakeModel(text = "") {
     .replace(/\s+/g, " ")
     .trim();
   
-  // Don't extract if text is too short or looks like a greeting
-  if (cleaned.length < 5 || /^(hi|hello|hey|my|me|i)\b/i.test(cleaned)) {
+  // Don't extract if text is too short or contains problem keywords
+  if (cleaned.length < 6) return "";
+  
+  // Exclude if it contains car problem keywords (these are issue descriptions, not car models)
+  if (/(steering|wheel|pull|pulling|brake|start|overheat|check|engine|noise|rattle|clunk|grind|squeal|shake|vibration|leak|smoke|stall|idle|rough|slipping|shift)/i.test(cleaned)) {
+    return "";
+  }
+  
+  // Exclude greetings and common phrases
+  if (/^(hi|hello|hey|my|me|i|the|this|that|is|it)\b/i.test(cleaned)) {
     return "";
   }
     
@@ -98,17 +106,13 @@ function extractCarMakeModel(text = "") {
   const m1 = cleaned.match(/\b(19\d{2}|20[0-2]\d)\s+([A-Za-z]+)\s+([A-Za-z0-9]+)\b/);
   if (m1) return `${m1[2]} ${m1[3]}`.trim();
   
-  // "Ford Explorer" - but must be car-related words
-  const m2 = cleaned.match(/\b([A-Za-z]+)\s+([A-Za-z0-9]+)\b/);
-  if (m2) {
-    const first = m2[1].toLowerCase();
-    const second = m2[2].toLowerCase();
-    // Only return if it looks like a car make/model
-    // Exclude common phrases
-    if (!/^(hi|my|me|the|this|that|is|it|steering|wheel|car|pulling|brake|start)$/i.test(first) &&
-        !/^(hi|my|me|the|this|that|is|it|steering|wheel|car|pulling|brake|start)$/i.test(second)) {
-      return `${m2[1]} ${m2[2]}`.trim();
-    }
+  // "Ford Explorer" - but must look like a car brand
+  // Common car brands to look for
+  const carBrands = /\b(toyota|honda|ford|chevy|chevrolet|gmc|dodge|ram|jeep|nissan|mazda|subaru|hyundai|kia|volkswagen|vw|bmw|mercedes|audi|lexus|acura|infiniti|cadillac|buick|lincoln|volvo|tesla|porsche)\b/i;
+  
+  if (carBrands.test(cleaned)) {
+    const m2 = cleaned.match(/\b([A-Za-z]+)\s+([A-Za-z0-9]+)\b/);
+    if (m2) return `${m2[1]} ${m2[2]}`.trim();
   }
   
   return "";
@@ -159,17 +163,17 @@ function serviceTypeFromCategory(cat = "general") {
 }
 
 const FOLLOWUP_BY_CATEGORY = {
-  brakes: "Are you hearing squeaking or grinding, and does it happen only when braking or all the time?",
-  pulling_alignment: "Does it pull mostly at higher speeds, and does the steering wheel shake or feel off-center?",
-  no_start: "When you turn the key, do you hear a click, a crank, or nothing at all? And are the dash lights on?",
-  overheating: "Has the temp gauge gone into the red, or have you seen steam or coolant leaks? How long into driving does it happen?",
-  check_engine: "Is the car running rough or losing power? And is the light flashing or solid?",
-  transmission: "Is it slipping, shifting hard, or refusing to go into gear? Any warning lights?",
-  ac: "Is it blowing warm air constantly or only at idle? Any unusual noises when the AC is on?",
-  electrical: "Are you seeing dimming lights, a battery warning, or intermittent power issues? When did it start?",
-  tire: "Is the tire flat right now, or losing air slowly?",
-  noise: "Is it more like a clunk, knock, or rattle, and does it happen over bumps, turning, or accelerating?",
-  general: "What's the make and model of the car?",
+  brakes: "Got it. Are you hearing squeaking or grinding, and does it happen only when braking or all the time?",
+  pulling_alignment: "Okay. Does it pull mostly at higher speeds, and does the steering wheel shake or feel off-center?",
+  no_start: "I understand. When you turn the key, do you hear a click, a crank, or nothing at all? And are the dash lights on?",
+  overheating: "Got it. Has the temp gauge gone into the red, or have you seen steam or coolant leaks? How long into driving does it happen?",
+  check_engine: "Okay. Is the car running rough or losing power? And is the light flashing or solid?",
+  transmission: "I see. Is it slipping, shifting hard, or refusing to go into gear? Any warning lights?",
+  ac: "Understood. Is it blowing warm air constantly or only at idle? Any unusual noises when the AC is on?",
+  electrical: "Got it. Are you seeing dimming lights, a battery warning, or intermittent power issues? When did it start?",
+  tire: "Okay. Is the tire flat right now, or losing air slowly?",
+  noise: "I hear you. Is it more like a clunk, knock, or rattle, and does it happen over bumps, turning, or accelerating?",
+  general: "Okay, tell me more about what's happening.",
 };
 
 //────────────────────────────────────────────────────────────────────────────────
@@ -269,8 +273,8 @@ app.post("/transfer", (req, res) => {
   `);
 });
 
-// Your greeting (as requested)
-const VOICE_GREETING = "Thanks for calling Mass Mechanic. Tell me what's going on with your car and I'll get you matched with a trusted local mechanic for free.";
+// Updated greeting as requested
+const VOICE_GREETING = "Thanks for calling Mass Mechanic — we connect you with trusted local mechanics for fast, free repair quotes. Tell me what's wrong with your car or ask me a quick question.";
 
 //────────────────────────────────────────────────────────────────────────────────
 // 4) SPEAK + LOGGING HELPERS
@@ -436,7 +440,7 @@ wss.on("connection", (ws) => {
       role: "system",
       content:
         "You are the MassMechanic phone agent. Keep replies SHORT (1 sentence). Ask ONE question at a time. " +
-        "Goal: collect (1) what's wrong, (2) ZIP code, (3) first name, (4) car make/model (year optional). " +
+        "Goal: collect (1) what's wrong, (2) car make/model/year, (3) first name, (4) ZIP code. " +
         "Do NOT ask for last name. Do NOT end the call until you confirm the details. " +
         "If user says 'no' to confirmation, ask what to correct and then re-confirm.",
     },
@@ -501,7 +505,7 @@ wss.on("connection", (ws) => {
   
   function readyToConfirm() {
     // Require carMakeModel so lead insert doesn't violate NOT NULL
-    return Boolean(state.issueText && state.zip && state.name && state.carMakeModel);
+    return Boolean(state.issueText && state.carMakeModel && state.name && state.zip);
   }
   
   async function say(text) {
@@ -574,7 +578,10 @@ wss.on("connection", (ws) => {
         }
       }
       
-      // ALWAYS attempt extraction (but only if not already set)
+      // Extract data ONLY when we're explicitly asking for it
+      // This prevents false extractions from issue descriptions
+      
+      // Only extract ZIP when we don't have it yet
       if (!state.zip) {
         const z = extractZip(text);
         if (z) {
@@ -583,6 +590,7 @@ wss.on("connection", (ws) => {
         }
       }
       
+      // Only extract name when we don't have it yet
       if (!state.name) {
         const n = extractName(text);
         if (n) {
@@ -591,6 +599,7 @@ wss.on("connection", (ws) => {
         }
       }
       
+      // Only extract car when we don't have it yet
       if (!state.carYear) {
         const y = extractCarYear(text);
         if (y) {
@@ -611,22 +620,12 @@ wss.on("connection", (ws) => {
       if (!state.issueText) {
         const z = extractZip(text);
         const n = extractName(text);
-        const mm = extractCarMakeModel(text);
         
-        // If utterance is not just zip/name/vehicle, treat as issue
-        if (!z && !n && !mm && text.length > 6) {
+        // If utterance is not just zip/name, treat as issue
+        if (!z && !n && text.length > 6) {
           state.issueText = text;
           state.issueCategory = categorizeIssue(text);
           console.log(`✅ Captured issue: ${text} (category: ${state.issueCategory})`);
-        }
-        
-        // If user says "my car is pulling to the right" etc, we still want to capture issue
-        if (!state.issueText && text.length > 6 && !z && !n) {
-          if (/(pull|brake|start|overheat|check engine|noise|shake|vibration|ac|battery|transmission|stall)/i.test(text)) {
-            state.issueText = text;
-            state.issueCategory = categorizeIssue(text);
-            console.log(`✅ Captured issue (fallback): ${text} (category: ${state.issueCategory})`);
-          }
         }
       }
       
@@ -678,37 +677,42 @@ wss.on("connection", (ws) => {
         state.awaitingConfirmation = false;
       }
       
-      // Deterministic follow-ups to reduce "AI weirdness"
+      // UPDATED FLOW ORDER: issue -> followup -> car -> name -> zip -> confirm
+      
+      // Step 1: Get the issue
+      if (!state.issueText) {
+        await say("Tell me what's wrong with your car.");
+        return;
+      }
+      
+      // Step 2: Ask follow-up about the issue
       if (state.issueText && !state.askedFollowup) {
         state.askedFollowup = true;
-        state.awaitingFollowupResponse = true; // Flag that we're waiting for their answer
+        state.awaitingFollowupResponse = true;
         const followup = FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general;
         await say(followup);
         return;
       }
       
-      // Ask missing fields in a stable order (issue -> zip -> name -> car)
-      if (!state.issueText) {
-        await say("Tell me what's going on with your car.");
+      // Step 3: Get car make/model/year
+      if (!state.carMakeModel) {
+        await say("What's the make and model of your car?");
         return;
       }
       
-      if (!state.zip) {
-        await say("What's your 5-digit ZIP code?");
-        return;
-      }
-      
+      // Step 4: Get name
       if (!state.name) {
         await say("And what's your first name?");
         return;
       }
       
-      if (!state.carMakeModel) {
-        await say("What's the make and model of the car?");
+      // Step 5: Get ZIP code
+      if (!state.zip) {
+        await say("What's your 5-digit ZIP code?");
         return;
       }
       
-      // Confirmation (pronounce ZIP with leading zeros)
+      // Step 6: Confirmation
       if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
         state.awaitingConfirmation = true;
         const zipSpoken = speakZipDigits(state.zip);
