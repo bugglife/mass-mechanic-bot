@@ -1,3 +1,15 @@
+// server.js
+// MassMechanic Voice Server (Twilio Media Streams + Deepgram STT/TTS + Supabase)
+// Updates included:
+// ✅ Speak ZIP digit-by-digit (leading zero preserved)
+// ✅ Never ask for last name
+// ✅ ZIP retry guardrail (max 2 misfires) -> offer/text fallback
+// ✅ Log every call on hangup (call_outcomes best-effort)
+// ✅ Create lead + dispatch to mechanics ONLY after explicit confirmation "YES"
+// ✅ “Clear audio” before speaking (reduces talking-over)
+// ✅ Confirmation loop tightened (won’t spiral forever)
+// ✅ OpenAI failure fallback (still completes flow without crashing)
+
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
 import twilio from "twilio";
@@ -26,12 +38,13 @@ function looksLikeNo(text = "") {
   return /^(no|nope|not really|wrong|incorrect)\b/i.test(text.trim());
 }
 
-// Basic extraction helpers
+// Extract ZIP (5 digits)
 function extractZip(text = "") {
   const m = text.match(/\b(\d{5})(?:-\d{4})?\b/);
   return m ? m[1] : "";
 }
 
+// Extract a simple first name / short name
 function extractName(text = "") {
   const m = text.match(/\b(my name is|this is|i'm|im)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)\b/i);
   if (m?.[2]) return m[2].trim();
@@ -41,96 +54,64 @@ function extractName(text = "") {
   return "";
 }
 
-// Issue routing (expanded keyword-based; tune freely)
+// Speak ZIP digit-by-digit so leading zeros are spoken
+function speakZip(zip) {
+  const z = String(zip || "").replace(/\D/g, "");
+  if (z.length !== 5) return String(zip || "");
+  return z.split("").join(" ");
+}
+
+// Normalize ZIP to 5 digits if possible (keeps leading zeros)
+function normalizeZip(zip) {
+  const z = String(zip || "").replace(/\D/g, "");
+  if (z.length === 5) return z;
+  return "";
+}
+
+// Issue routing (keyword-based; tune freely)
 function categorizeIssue(text = "") {
   const t = text.toLowerCase();
-
-  // non-drivable / urgent
-  if (/(won't start|wont start|no start|clicking|starter|dead battery|jump start|no crank|cranks but won't start)/i.test(t))
-    return "no_start";
-  if (/(overheat|overheating|temperature gauge|coolant|radiator|steam|hot smell)/i.test(t))
-    return "overheating";
-  if (/(brake|grind|squeal|squeak|pedal soft|pedal spongy|rotor|caliper|abs light)/i.test(t))
-    return "brakes";
-  if (/(pulls to the (right|left)|pulling|alignment|steering wheel|drifts|shakes at speed|vibration at speed)/i.test(t))
-    return "pulling_alignment";
-  if (/(check engine|cel|engine light|code|misfire|rough idle|stalling|hesitation|loss of power)/i.test(t))
-    return "check_engine";
-  if (/(transmission|slipping|hard shift|won't shift|gear|fluid leak transmission)/i.test(t))
-    return "transmission";
-  if (/(ac|a\/c|air conditioner|no cold|blowing warm|refrigerant|compressor)/i.test(t))
-    return "ac";
-  if (/(battery|alternator|charging|lights dim|electrical|short|fuse|parasitic drain)/i.test(t))
-    return "electrical";
-  if (/(noise|rattle|clunk|knock|squeak when turning|wheel bearing|humming|grinding while driving)/i.test(t))
-    return "noise";
-  if (/(flat tire|tire|puncture|blowout|nail in tire|tpms)/i.test(t))
-    return "tire";
-  if (/(oil leak|leaking oil|burning oil|low oil pressure|oil light)/i.test(t))
-    return "oil_leak";
-  if (/(coolant leak|leaking coolant|puddle green|puddle orange)/i.test(t))
-    return "coolant_leak";
-  if (/(smoke|smoking|burning smell|gas smell|fuel smell)/i.test(t))
-    return "smoke_smell";
-  if (/(suspension|control arm|strut|shock|ball joint|tie rod|cv axle|clicking when turning)/i.test(t))
-    return "suspension_steering";
-  if (/(battery light|abs light|traction control|stability control)/i.test(t))
-    return "warning_lights";
-
+  if (/(won't start|wont start|no start|clicking|starter|dead battery|jump start)/i.test(t)) return "no_start";
+  if (/(overheat|overheating|temperature gauge|coolant|radiator|steam)/i.test(t)) return "overheating";
+  if (/(brake|grind|squeal|squeak|pedal|rotor)/i.test(t)) return "brakes";
+  if (/(pulls to the (right|left)|pulling|alignment|steering wheel|drifts)/i.test(t)) return "pulling_alignment";
+  if (/(check engine|cel|engine light|code|misfire|rough idle)/i.test(t)) return "check_engine";
+  if (/(transmission|slipping|hard shift|won't shift|gear)/i.test(t)) return "transmission";
+  if (/(ac|a\/c|air conditioner|no cold|blowing warm)/i.test(t)) return "ac";
+  if (/(battery|alternator|charging|lights dim|electrical)/i.test(t)) return "electrical";
+  if (/(noise|rattle|clunk|knock)/i.test(t)) return "noise";
+  if (/(flat tire|tire|puncture|blowout)/i.test(t)) return "tire";
   return "general";
 }
 
 const FOLLOWUP_BY_CATEGORY = {
-  brakes: "Got it. Are you hearing squeaking or grinding, and does it happen only when braking or also while driving?",
+  brakes: "Got it. Are you hearing squeaking or grinding, and does it happen only when braking or all the time?",
   pulling_alignment: "When it pulls, is it mostly at higher speeds, and does the steering wheel shake or feel off-center?",
   no_start: "When you turn the key, do you hear a click, a crank, or nothing at all? And are the dash lights on?",
   overheating: "Has the temp gauge gone into the red or have you seen steam/coolant leaks? How long into driving does it happen?",
   check_engine: "Is the car running rough, shaking, or losing power? And is the light flashing or solid?",
   transmission: "Is it slipping, shifting hard, or refusing to go into gear? Any warning lights?",
   ac: "Is it blowing warm air constantly or only at idle? Any unusual noises when AC is on?",
-  electrical: "Are you seeing dimming lights, warning lights, or intermittent power issues? When did it start?",
+  electrical: "Are you seeing dimming lights, battery warning, or intermittent power issues? When did it start?",
   noise: "Is the noise more like a clunk/knock/rattle, and does it happen over bumps, turning, or accelerating?",
-  tire: "Is the tire flat right now, or losing air slowly? Is the car safe to drive at the moment?",
-  oil_leak: "Are you seeing a puddle under the car, or is the oil level dropping on the dipstick? Any warning lights?",
-  coolant_leak: "Are you seeing a puddle or smell coolant? Is the temperature climbing when you drive?",
-  smoke_smell: "What color smoke is it (white/blue/black), and is there a strong burning or fuel smell?",
-  suspension_steering: "Does it happen over bumps, during turns, or when accelerating? Any clicking when turning?",
-  warning_lights: "Which light is on, and is it flashing or solid? Any change in how the car drives?",
+  tire: "Is the tire flat right now, or losing air slowly?",
   general: "Got it. What’s the make/model and roughly when did the issue start?"
 };
 
-// Map issueCategory -> leads.service_type (keep consistent with your app vocabulary)
+// Map issue category -> your lead service_type labels (edit these to match your DB exactly)
 const SERVICE_TYPE_BY_CATEGORY = {
   brakes: "brake-repair",
   pulling_alignment: "suspension-steering",
-  no_start: "no-start-diagnostic",
+  no_start: "starting-charging",
   overheating: "cooling-system",
-  check_engine: "check-engine-diagnostic",
-  transmission: "transmission",
+  check_engine: "check-engine",
+  transmission: "transmission-repair",
   ac: "ac-repair",
-  electrical: "electrical-system",
-  noise: "noise-diagnostic",
+  electrical: "electrical-diagnosis",
+  noise: "diagnostic",
   tire: "tire-service",
-  oil_leak: "oil-leak",
-  coolant_leak: "coolant-leak",
-  smoke_smell: "smoke-smell-diagnostic",
-  suspension_steering: "suspension-steering",
-  warning_lights: "warning-light-diagnostic",
-  general: "general-diagnostic"
+  general: "diagnostic"
 };
-
-// Keep AI to ONE question (or one short statement). Truncate extra questions.
-function enforceOneQuestion(text = "") {
-  const t = String(text).trim();
-  if (!t) return t;
-
-  const qCount = (t.match(/\?/g) || []).length;
-  if (qCount <= 1) return t;
-
-  // Keep everything up to first '?'
-  const idx = t.indexOf("?");
-  return t.slice(0, idx + 1).trim();
-}
 
 // ───────────────────────────────────────────────────────────────────────────────
 // 1. CONFIGURATION & SETUP
@@ -150,11 +131,13 @@ const {
   SUPABASE_URL,
   SUPABASE_KEY,
   PUBLIC_BASE_URL,
-  ADMIN_ESCALATION_PHONE
+  ADMIN_ESCALATION_PHONE,
+  // Optional: where you want to send them to finish details by text
+  QUOTE_FORM_URL // e.g. https://massmechanic.com/get-free-quotes
 } = process.env;
 
-if (!OPENAI_API_KEY || !DEEPGRAM_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("❌ CRITICAL: Missing API Keys.");
+if (!DEEPGRAM_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
+  console.error("❌ CRITICAL: Missing required env vars.");
   process.exit(1);
 }
 
@@ -167,11 +150,11 @@ const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 app.get("/", (req, res) => res.send("Mass Mechanic Server is Awake 🤖"));
 
 // ────────────────────────────────────────────────────────────
-// 4. VOICE SERVER
+// 3. TWILIO WEBHOOKS
 // ────────────────────────────────────────────────────────────
 const VOICE_GREETING =
   "Thanks for calling MassMechanic — we connect you with trusted local mechanics for fast, free repair quotes. " +
-  "Are you calling about a repair you need help with right now, or do you have a quick question?";
+  "First, what’s your first name?";
 
 function getStreamUrl(req) {
   const host = req.headers["x-forwarded-host"] || req.headers.host;
@@ -180,63 +163,10 @@ function getStreamUrl(req) {
   return `${proto}://${host}/`;
 }
 
-// NOTE: speakOverStream is replaced at runtime per-connection with a “locked” version,
-// because we need to estimate duration and allow barge-in.
-async function baseSpeakOverStream({ ws, streamSid, text, deepgramKey }) {
-  const ttsResponse = await fetch(
-    "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Token ${deepgramKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ text })
-    }
-  );
-
-  if (!ttsResponse.ok) {
-    const errText = await ttsResponse.text().catch(() => "");
-    console.error("❌ TTS Failed:", ttsResponse.status, errText);
-    return { bytes: 0 };
-  }
-
-  const audioBuffer = await ttsResponse.arrayBuffer();
-  const base64Audio = Buffer.from(audioBuffer).toString("base64");
-
-  if (ws.readyState === WebSocket.OPEN && streamSid) {
-    ws.send(JSON.stringify({ event: "media", streamSid, media: { payload: base64Audio } }));
-  }
-
-  return { bytes: audioBuffer.byteLength };
-}
-
-async function sendVoiceEscalationSummary({ callerPhone, trigger, lastMessage }) {
-  try {
-    await supabase.functions.invoke("send-escalation-summary", {
-      body: { phone: callerPhone, channel: "voice", trigger, last_message: lastMessage }
-    });
-    console.log("✅ Escalation summary invoked");
-  } catch (e) {
-    console.error("❌ send-escalation-summary failed:", e);
-  }
-}
-
-async function transferCallToHuman(callSid) {
-  if (!ADMIN_ESCALATION_PHONE) return console.error("❌ Missing ADMIN_ESCALATION_PHONE env var");
-  if (!callSid) return console.error("❌ Missing callSid — cannot transfer");
-
-  const baseUrl = PUBLIC_BASE_URL || "https://mass-mechanic-bot.onrender.com";
-  const transferUrl = `${baseUrl}/transfer`;
-
-  await twilioClient.calls(callSid).update({ url: transferUrl, method: "POST" });
-  console.log("📞 Call transfer initiated", { callSid, transferUrl });
-}
-
 app.post("/voice", (req, res) => {
   res.type("text/xml");
-
   const streamUrl = getStreamUrl(req);
+
   const from = normalizePhone(req.body?.From || "");
   const caller = normalizePhone(req.body?.Caller || "");
   const callSid = req.body?.CallSid || "";
@@ -277,6 +207,140 @@ app.post("/transfer", (req, res) => {
 });
 
 // ────────────────────────────────────────────────────────────
+// 4. VOICE CORE
+// ────────────────────────────────────────────────────────────
+async function sendSms(toE164DigitsOr11, body) {
+  if (!TWILIO_PHONE_NUMBER) return;
+  const toDigits = String(toE164DigitsOr11 || "").replace(/\D/g, "");
+  if (!toDigits) return;
+
+  // Twilio accepts E.164; we store callerPhone as 1XXXXXXXXXX
+  const to = toDigits.length === 11 && toDigits.startsWith("1") ? `+${toDigits}` : `+1${toDigits}`;
+
+  try {
+    await twilioClient.messages.create({
+      to,
+      from: TWILIO_PHONE_NUMBER,
+      body
+    });
+  } catch (e) {
+    console.error("❌ SMS send failed:", e?.message || e);
+  }
+}
+
+async function transferCallToHuman(callSid) {
+  if (!ADMIN_ESCALATION_PHONE) return console.error("❌ Missing ADMIN_ESCALATION_PHONE env var");
+  if (!callSid) return console.error("❌ Missing callSid — cannot transfer");
+
+  const baseUrl = PUBLIC_BASE_URL || "https://mass-mechanic-bot.onrender.com";
+  const transferUrl = `${baseUrl}/transfer`;
+
+  await twilioClient.calls(callSid).update({ url: transferUrl, method: "POST" });
+  console.log("📞 Call transfer initiated", { callSid, transferUrl });
+}
+
+// “Clear audio” reduces the bot talking over the caller if they start speaking mid-TTS
+function clearTwilioAudio(ws, streamSid) {
+  if (ws.readyState === WebSocket.OPEN && streamSid) {
+    ws.send(JSON.stringify({ event: "clear", streamSid }));
+  }
+}
+
+async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
+  // Clear buffered audio before speaking new prompt
+  clearTwilioAudio(ws, streamSid);
+
+  const ttsResponse = await fetch(
+    "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Token ${deepgramKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ text })
+    }
+  );
+
+  if (!ttsResponse.ok) {
+    const errText = await ttsResponse.text().catch(() => "");
+    console.error("❌ TTS Failed:", ttsResponse.status, errText);
+    return;
+  }
+
+  const audioBuffer = await ttsResponse.arrayBuffer();
+  const base64Audio = Buffer.from(audioBuffer).toString("base64");
+
+  if (ws.readyState === WebSocket.OPEN && streamSid) {
+    ws.send(JSON.stringify({ event: "media", streamSid, media: { payload: base64Audio } }));
+  }
+}
+
+// Best-effort: record call outcome
+async function writeCallOutcome({ callSid, callerPhone, confirmed, outcome, name, zip, issueCategory, issueText, notes }) {
+  try {
+    const payload = {
+      call_sid: callSid || null,
+      phone: callerPhone || null,
+      confirmed: !!confirmed,
+      outcome: outcome || (confirmed ? "call_completed" : "call_ended"),
+      name: name || null,
+      zip_code: zip || null,
+      issue_category: issueCategory || null,
+      issue_text: issueText || null,
+      notes: notes || null
+    };
+
+    const { error } = await supabase.from("call_outcomes").insert(payload);
+    if (error) console.warn("⚠️ call_outcomes insert failed:", error.message);
+  } catch (e) {
+    console.warn("⚠️ call_outcomes insert exception:", e?.message || e);
+  }
+}
+
+// Create a lead + invoke send-lead-to-mechanics edge function
+async function createLeadAndDispatch({ callerPhone, name, zip, issueText, issueCategory }) {
+  const zip5 = normalizeZip(zip);
+
+  // Minimal lead insert (adjust columns to match your schema)
+  const leadInsert = {
+    source: "voice",
+    phone: String(callerPhone || "").replace(/\D/g, ""), // e.g. 1XXXXXXXXXX
+    customer_name: name || null,
+    zip_code: zip5 || null,
+    description: issueText || null,
+    service_type: SERVICE_TYPE_BY_CATEGORY[issueCategory] || SERVICE_TYPE_BY_CATEGORY.general,
+    lead_category: "repair" // keep consistent with your edge function skip logic
+  };
+
+  const { data: lead, error } = await supabase
+    .from("leads")
+    .insert(leadInsert)
+    .select("id, lead_code")
+    .maybeSingle();
+
+  if (error || !lead?.id) {
+    console.error("❌ Lead insert failed:", error?.message || "no lead returned");
+    return { ok: false, error: error?.message || "lead_insert_failed" };
+  }
+
+  // Invoke your edge function to send lead to mechanics
+  try {
+    const { data: invokeData, error: invokeErr } = await supabase.functions.invoke("send-lead-to-mechanics", {
+      body: { lead_id: lead.id }
+    });
+    if (invokeErr) {
+      console.error("❌ send-lead-to-mechanics invoke failed:", invokeErr.message);
+      return { ok: true, lead, dispatch_ok: false, dispatch_error: invokeErr.message };
+    }
+    return { ok: true, lead, dispatch_ok: true, dispatch_result: invokeData };
+  } catch (e) {
+    console.error("❌ send-lead-to-mechanics exception:", e?.message || e);
+    return { ok: true, lead, dispatch_ok: false, dispatch_error: e?.message || "invoke_exception" };
+  }
+}
+
+// ────────────────────────────────────────────────────────────
 // 5. WEBSOCKET SERVER FOR TWILIO MEDIA STREAMS
 // ────────────────────────────────────────────────────────────
 const server = app.listen(PORT, () => console.log(`✅ MassMechanic Running on ${PORT}`));
@@ -293,171 +357,36 @@ wss.on("connection", (ws) => {
   let deepgramLive = null;
   let greeted = false;
 
-  let callerPhone = "unknown";
+  let callerPhone = "unknown"; // stored as 1XXXXXXXXXX
   let callSid = "";
   let transferred = false;
 
-  // TURN-TAKING / GUARDRAILS
-  let isSpeaking = false;
-  let pendingFinalText = "";
-  let lastFinalText = "";
-  let lastFinalAt = 0;
-  let finalDebounceTimer = null;
-  let inFlight = false; // hard block double-processing
-
-  // Conversation state
   const state = {
     name: "",
     zip: "",
+    zipAttempts: 0,
     issueText: "",
     issueCategory: "general",
     askedFollowup: false,
     awaitingConfirmation: false,
-    confirmed: false
+    confirmed: false,
+    leadCreated: false
   };
 
-  let messages = [
-    {
-      role: "system",
-      content:
-        "You are the MassMechanic phone agent. Keep answers SHORT (1–2 sentences). " +
-        "Goal: collect Name, ZIP, and the car issue. Ask ONE question at a time. " +
-        "Never output more than ONE question. " +
-        "IMPORTANT: Do NOT end the call until you have CONFIRMED: Name + ZIP + Issue. " +
-        "Before closing, ask: 'To confirm, you're in ZIP ___ and the issue is ___ — is that right?' " +
-        "If the user says yes, close politely. If no, correct details and re-confirm. " +
-        "The opening greeting has ALREADY been spoken, so do NOT repeat it."
-    }
-  ];
+  // Keep it simple, prevent model from adding “last name” nonsense
+  const SYSTEM_RULES =
+    "You are the MassMechanic phone agent. Keep answers SHORT (1–2 sentences). " +
+    "Ask ONE question at a time. Do NOT ask for last name. " +
+    "Goal: collect First Name, 5-digit ZIP, and a brief car issue. " +
+    "After you have them, ask: 'To confirm, you're in ZIP ___ and the issue is ___ — is that right?' " +
+    "If yes: thank them and say you're connecting them with a mechanic. If no: ask what to correct.";
 
-  function readyToConfirm() {
-    return Boolean(state.name && state.zip && state.issueText);
-  }
-
-  function twilioClearAudio() {
-    if (ws.readyState === WebSocket.OPEN && streamSid) {
-      ws.send(JSON.stringify({ event: "clear", streamSid }));
-    }
-  }
-
-  function isDuplicateFinal(text) {
-    const now = Date.now();
-    const normalized = String(text).trim().toLowerCase();
-    if (normalized && normalized === lastFinalText && now - lastFinalAt < 1500) return true;
-    lastFinalText = normalized;
-    lastFinalAt = now;
-    return false;
-  }
-
-  async function speakOverStreamWithLock(text) {
-    const safeText = enforceOneQuestion(text);
-
-    // speaking lock
-    isSpeaking = true;
-
-    const { bytes } = await baseSpeakOverStream({
-      ws,
-      streamSid,
-      text: safeText,
-      deepgramKey: DEEPGRAM_API_KEY
-    });
-
-    // mulaw 8kHz: ~8000 bytes/sec
-    const durationSec = Math.max(0.35, bytes / 8000);
-
-    setTimeout(() => {
-      isSpeaking = false;
-
-      // If caller spoke while we were talking, handle it now
-      if (pendingFinalText && pendingFinalText.trim()) {
-        const t = pendingFinalText;
-        pendingFinalText = "";
-        processAiResponse(t);
-      }
-    }, durationSec * 1000 + 250);
-  }
-
-  async function writeCallOutcome({ confirmed, outcome, notes }) {
-    try {
-      // You’ll create this table via Lovable prompt below
-      const payload = {
-        call_sid: callSid || null,
-        caller_phone: callerPhone || null,
-        name: state.name || null,
-        zip_code: state.zip || null,
-        issue_text: state.issueText || null,
-        issue_category: state.issueCategory || null,
-        confirmed: !!confirmed,
-        outcome: outcome || null,
-        notes: notes || null,
-        source: "voice"
-      };
-
-      const { error } = await supabase.from("call_outcomes").insert(payload);
-      if (error) console.error("❌ call_outcomes insert error:", error);
-      else console.log("✅ call_outcomes inserted");
-    } catch (e) {
-      console.error("❌ writeCallOutcome exception:", e);
-    }
-  }
-
-  async function createVoiceLeadAndDispatch() {
-    try {
-      // Create a lead for voice calls (since quoteform.tsx creates leads for web)
-      // Normalize phone the same way your edge function expects (11 digits: 1XXXXXXXXXX)
-      const phoneDb = normalizePhone(callerPhone);
-
-      const service_type = SERVICE_TYPE_BY_CATEGORY[state.issueCategory] || "general-diagnostic";
-
-      const leadInsert = {
-        phone: phoneDb || null,
-        zip_code: state.zip || null,
-        service_type,
-        description: state.issueText || null,
-        lead_category: "repair",
-        lead_tier: "med",
-        drivable: "Unknown",
-        urgency_window: "Unknown",
-        // optional extras:
-        car_year: null,
-        car_make_model: null
-      };
-
-      const { data: lead, error: leadErr } = await supabase
-        .from("leads")
-        .insert(leadInsert)
-        .select("id")
-        .maybeSingle();
-
-      if (leadErr || !lead?.id) {
-        console.error("❌ Voice lead insert failed:", leadErr);
-        return null;
-      }
-
-      console.log("✅ Voice lead created:", lead.id);
-
-      // Kick the Edge Function that assigns + texts mechanics
-      try {
-        const { data, error } = await supabase.functions.invoke("send-lead-to-mechanics", {
-          body: { lead_id: lead.id }
-        });
-        if (error) console.error("❌ send-lead-to-mechanics invoke error:", error);
-        else console.log("✅ send-lead-to-mechanics invoked:", data);
-      } catch (e) {
-        console.error("❌ send-lead-to-mechanics invoke exception:", e);
-      }
-
-      return lead.id;
-    } catch (e) {
-      console.error("❌ createVoiceLeadAndDispatch exception:", e);
-      return null;
-    }
-  }
+  let messages = [{ role: "system", content: SYSTEM_RULES }];
 
   const setupDeepgram = () => {
-    // NOTE: endpointing + interim results helps turn-taking
+    // NOTE: interim_results=true helps barge-in/turn-taking, but we only respond on is_final.
     deepgramLive = new WebSocket(
-      "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&model=nova-2&smart_format=true&interim_results=true&endpointing=250&utterance_end_ms=1000",
+      "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&model=nova-2&smart_format=true&interim_results=true&endpointing=200",
       { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
     );
 
@@ -466,40 +395,24 @@ wss.on("connection", (ws) => {
     deepgramLive.on("message", (data) => {
       if (transferred) return;
 
-      const received = JSON.parse(data);
-      const alt = received.channel?.alternatives?.[0];
-      const transcript = alt?.transcript?.trim() || "";
-      if (!transcript) return;
-
-      // BARGE-IN: if user is speaking while we are speaking, clear queued audio
-      if (!received.is_final && isSpeaking) {
-        twilioClearAudio();
-        isSpeaking = false;
+      let received;
+      try {
+        received = JSON.parse(data);
+      } catch {
+        return;
       }
 
-      if (!received.is_final) return;
+      const transcript = received.channel?.alternatives?.[0]?.transcript;
 
-      if (isDuplicateFinal(transcript)) return;
+      // If user starts talking while bot audio is buffered, clear audio.
+      if (transcript && !received.is_final && transcript.trim().length > 0) {
+        clearTwilioAudio(ws, streamSid);
+      }
 
-      // Debounce finals: wait a beat for the utterance to settle
-      pendingFinalText = transcript;
-      if (finalDebounceTimer) clearTimeout(finalDebounceTimer);
-
-      finalDebounceTimer = setTimeout(() => {
-        const textToProcess = pendingFinalText;
-        pendingFinalText = "";
-
-        if (!textToProcess) return;
-
-        // If AI is speaking, queue it; else process now
-        if (isSpeaking) {
-          pendingFinalText = textToProcess;
-          return;
-        }
-
-        console.log(`🗣️ User: ${textToProcess}`);
-        processAiResponse(textToProcess);
-      }, 450);
+      if (transcript && received.is_final && transcript.trim().length > 0) {
+        console.log(`🗣️ User: ${transcript}`);
+        processTurn(transcript);
+      }
     });
 
     deepgramLive.on("error", (err) => console.error("DG Error:", err));
@@ -507,25 +420,50 @@ wss.on("connection", (ws) => {
 
   setupDeepgram();
 
-  const processAiResponse = async (text) => {
-    if (inFlight) return;
-    inFlight = true;
+  function readyToConfirm() {
+    return Boolean(state.name && normalizeZip(state.zip) && state.issueText);
+  }
 
+  async function offerTextFallback(reason = "zip_trouble") {
+    const formUrl = QUOTE_FORM_URL || "your booking form link";
+    const msg =
+      `No worries — you can text us your ZIP and a quick description, and we’ll connect you with a mechanic. ` +
+      `Or use this form: ${formUrl}`;
+    await speakOverStream({ ws, streamSid, text: msg, deepgramKey: DEEPGRAM_API_KEY });
+
+    // If we know their number, also text them
+    if (callerPhone && callerPhone !== "unknown") {
+      await sendSms(callerPhone, `MassMechanic: Reply with your ZIP + what’s going on, or use: ${formUrl}`);
+    }
+
+    await writeCallOutcome({
+      callSid,
+      callerPhone,
+      confirmed: false,
+      outcome: "needs_text_followup",
+      name: state.name,
+      zip: normalizeZip(state.zip),
+      issueCategory: state.issueCategory,
+      issueText: state.issueText,
+      notes: `Fallback offered: ${reason}`
+    });
+  }
+
+  async function processTurn(text) {
     try {
       if (transferred) return;
 
       // Human escalation
       if (wantsHumanFromText(text)) {
         transferred = true;
-        console.log("🚨 Human requested — escalating", { callSid, callerPhone, text });
 
-        await sendVoiceEscalationSummary({
-          callerPhone,
-          trigger: "REQUESTED_HUMAN",
-          lastMessage: text
+        await speakOverStream({
+          ws,
+          streamSid,
+          text: "Got it — connecting you to an operator now.",
+          deepgramKey: DEEPGRAM_API_KEY
         });
 
-        await speakOverStreamWithLock("Got it — connecting you to an operator now.");
         await transferCallToHuman(callSid);
 
         try { if (deepgramLive) deepgramLive.close(); } catch {}
@@ -533,145 +471,181 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // Lightweight extraction from user input
-      if (!state.zip) {
-        const z = extractZip(text);
-        if (z) state.zip = z;
-      }
-      if (!state.name) {
-        const n = extractName(text);
-        if (n) state.name = n;
-      }
-
-      // Capture issue text only if it looks like a description (not just name/zip)
-      if (!state.issueText && text.length > 6) {
-        if (!extractZip(text) && !extractName(text)) {
-          state.issueText = text.trim();
-          state.issueCategory = categorizeIssue(state.issueText);
-        }
-      }
-
-      // If awaiting confirmation, interpret yes/no
+      // If awaiting confirmation, interpret yes/no immediately
       if (state.awaitingConfirmation && !state.confirmed) {
         if (looksLikeYes(text)) {
           state.confirmed = true;
           state.awaitingConfirmation = false;
 
-          // Confirmation hook: write call_outcome + create lead + dispatch mechanics
-          await writeCallOutcome({
-            confirmed: true,
-            outcome: "confirmed_details",
-            notes: "Customer confirmed name/zip/issue on voice call"
-          });
+          // Log + create lead + dispatch exactly once
+          if (!state.leadCreated) {
+            state.leadCreated = true;
 
-          await createVoiceLeadAndDispatch();
+            await writeCallOutcome({
+              callSid,
+              callerPhone,
+              confirmed: true,
+              outcome: "call_completed",
+              name: state.name,
+              zip: normalizeZip(state.zip),
+              issueCategory: state.issueCategory,
+              issueText: state.issueText,
+              notes: "Confirmed by caller"
+            });
 
-          const closing = `Perfect — thanks ${state.name || ""}. We’ll connect you with a local mechanic near ${state.zip}.`;
-          messages.push({ role: "assistant", content: closing });
-          await speakOverStreamWithLock(closing);
+            // Create lead + dispatch
+            await createLeadAndDispatch({
+              callerPhone,
+              name: state.name,
+              zip: normalizeZip(state.zip),
+              issueText: state.issueText,
+              issueCategory: state.issueCategory
+            });
+          }
+
+          const closing = `Perfect — thanks ${state.name}. We’ll connect you with a local mechanic near ZIP ${speakZip(
+            normalizeZip(state.zip)
+          )}.`;
+          await speakOverStream({ ws, streamSid, text: closing, deepgramKey: DEEPGRAM_API_KEY });
           return;
         }
 
         if (looksLikeNo(text)) {
           state.awaitingConfirmation = false;
-
-          await writeCallOutcome({
-            confirmed: false,
-            outcome: "needs_correction",
-            notes: "Customer said confirmation was incorrect"
-          });
-
           const fix = "No problem — what should I correct: your ZIP code, your name, or the issue?";
-          messages.push({ role: "assistant", content: fix });
-          await speakOverStreamWithLock(fix);
+          await speakOverStream({ ws, streamSid, text: fix, deepgramKey: DEEPGRAM_API_KEY });
           return;
         }
-        // if unclear, fall through to GPT
+        // If unclear, continue below (but we’ll keep things tight)
       }
 
-      messages.push({ role: "user", content: text });
+      // Lightweight extraction
+      if (!state.name) {
+        const n = extractName(text);
+        if (n) state.name = n;
+      }
 
-      // Deterministic follow-up once issue captured
+      // ZIP handling with retries
+      if (!normalizeZip(state.zip)) {
+        const z = extractZip(text);
+        if (z) state.zip = z;
+
+        // If user *seems* to give a zip but we didn't get 5 digits, count attempts
+        if (!z && /\b0?\d{3,5}\b/.test(text)) {
+          state.zipAttempts += 1;
+        }
+
+        // Hard guardrail: after 2 zip misfires -> text fallback
+        if (state.zipAttempts >= 2 && !normalizeZip(state.zip)) {
+          await offerTextFallback("zip_retry_limit");
+          return;
+        }
+      }
+
+      // Issue capture (avoid overwriting once set)
+      if (!state.issueText && text.length > 6) {
+        // Avoid treating “Tom” or “02321” as issue
+        const maybeZip = extractZip(text);
+        const maybeName = extractName(text);
+        if (!maybeZip && !maybeName) {
+          state.issueText = text.trim();
+          state.issueCategory = categorizeIssue(state.issueText);
+        }
+      }
+
+      // Deterministic follow-up once we have an issue
       if (state.issueText && !state.askedFollowup) {
         state.askedFollowup = true;
         const followup = FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general;
-        messages.push({ role: "assistant", content: followup });
-        await speakOverStreamWithLock(followup);
+        await speakOverStream({ ws, streamSid, text: followup, deepgramKey: DEEPGRAM_API_KEY });
         return;
       }
 
-      // Force confirmation when ready
+      // Force confirmation once ready
       if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
         state.awaitingConfirmation = true;
-        const confirmLine = `To confirm, you're in ZIP ${state.zip} and the issue is: ${state.issueText}. Is that right?`;
-        messages.push({ role: "assistant", content: confirmLine });
-        await speakOverStreamWithLock(confirmLine);
+        const confirmLine = `To confirm, you're in ZIP ${speakZip(normalizeZip(state.zip))} and the issue is: ${
+          state.issueText
+        }. Is that right?`;
+        await speakOverStream({ ws, streamSid, text: confirmLine, deepgramKey: DEEPGRAM_API_KEY });
         return;
       }
 
-      // Otherwise, use GPT to continue
-      const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "gpt-4o",
-          messages: [
-            ...messages,
-            {
-              role: "system",
-              content:
-                `Context (internal): name="${state.name}", zip="${state.zip}", issue_category="${state.issueCategory}", ` +
-                `issue_text="${state.issueText}", askedFollowup=${state.askedFollowup}, awaitingConfirmation=${state.awaitingConfirmation}. ` +
-                `Ask EXACTLY ONE short question that helps collect missing details. Do not ask two questions.`
-            }
-          ],
-          max_tokens: 120
-        })
+      // If something is missing, ask the next missing thing deterministically (avoid GPT weirdness)
+      if (!state.name) {
+        await speakOverStream({ ws, streamSid, text: "What’s your first name?", deepgramKey: DEEPGRAM_API_KEY });
+        return;
+      }
+      if (!normalizeZip(state.zip)) {
+        await speakOverStream({ ws, streamSid, text: "What’s your 5-digit ZIP code?", deepgramKey: DEEPGRAM_API_KEY });
+        return;
+      }
+      if (!state.issueText) {
+        await speakOverStream({ ws, streamSid, text: "What issue are you having with the car?", deepgramKey: DEEPGRAM_API_KEY });
+        return;
+      }
+
+      // OPTIONAL: Use OpenAI only if you want extra nuance; otherwise deterministic is safer.
+      // Keeping this as a best-effort, but NOT required for core flow.
+      if (OPENAI_API_KEY) {
+        messages.push({ role: "user", content: text });
+
+        const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages: [
+              ...messages,
+              {
+                role: "system",
+                content:
+                  `Internal context: name="${state.name}", zip="${normalizeZip(state.zip)}", issue="${state.issueText}". ` +
+                  `Ask ONE short question to clarify the issue. Do NOT ask for last name.`
+              }
+            ],
+            max_tokens: 90
+          })
+        });
+
+        const gptJson = await gpt.json();
+        const aiText = gptJson?.choices?.[0]?.message?.content?.trim();
+
+        if (aiText) {
+          messages.push({ role: "assistant", content: aiText });
+          await speakOverStream({ ws, streamSid, text: aiText, deepgramKey: DEEPGRAM_API_KEY });
+          return;
+        }
+      }
+
+      // Fallback if GPT fails / disabled
+      await speakOverStream({
+        ws,
+        streamSid,
+        text: "Thanks — to confirm, can you repeat your ZIP and the main issue in one sentence?",
+        deepgramKey: DEEPGRAM_API_KEY
       });
-
-      const gptJson = await gpt.json();
-
-      // Handle quota/rate-limit gracefully
-      if (!gpt.ok) {
-        console.error("❌ OpenAI error:", gpt.status, gptJson);
-        const fallback =
-          "I’m having a quick technical issue. Please visit massmechananic.com to submit your request, or text us your ZIP and the issue and we’ll follow up.";
-        await speakOverStreamWithLock(fallback);
-        await writeCallOutcome({
-          confirmed: false,
-          outcome: "ai_error",
-          notes: `OpenAI error status=${gpt.status}`
-        });
-        return;
-      }
-
-      let aiText = gptJson?.choices?.[0]?.message?.content?.trim();
-      aiText = enforceOneQuestion(aiText || "");
-
-      if (!aiText) {
-        const fallback =
-          "I’m having a quick technical issue. Please visit massmechananic.com to submit your request, or text us your ZIP and the issue and we’ll follow up.";
-        await speakOverStreamWithLock(fallback);
-        await writeCallOutcome({
-          confirmed: false,
-          outcome: "empty_ai",
-          notes: "No AI text returned"
-        });
-        return;
-      }
-
-      console.log(`🤖 AI: ${aiText}`);
-      messages.push({ role: "assistant", content: aiText });
-      await speakOverStreamWithLock(aiText);
     } catch (e) {
-      console.error("AI/TTS Error:", e);
-    } finally {
-      inFlight = false;
+      console.error("❌ processTurn error:", e?.message || e);
+      await speakOverStream({
+        ws,
+        streamSid,
+        text: "Sorry — quick technical issue. Please text us your ZIP and what’s going on and we’ll help right away.",
+        deepgramKey: DEEPGRAM_API_KEY
+      });
+      if (callerPhone && callerPhone !== "unknown") {
+        await sendSms(callerPhone, `MassMechanic: Reply with your ZIP + what’s going on, and we’ll connect you fast.`);
+      }
     }
-  };
+  }
 
   ws.on("message", async (msg) => {
-    const data = JSON.parse(msg);
+    let data;
+    try {
+      data = JSON.parse(msg);
+    } catch {
+      return;
+    }
 
     if (data.event === "start") {
       streamSid = data.start.streamSid;
@@ -685,8 +659,12 @@ wss.on("connection", (ws) => {
 
       if (!greeted) {
         greeted = true;
-        messages.push({ role: "assistant", content: VOICE_GREETING });
-        await speakOverStreamWithLock(VOICE_GREETING);
+        await speakOverStream({
+          ws,
+          streamSid,
+          text: VOICE_GREETING,
+          deepgramKey: DEEPGRAM_API_KEY
+        });
       }
       return;
     }
@@ -697,12 +675,25 @@ wss.on("connection", (ws) => {
     }
 
     if (data.event === "stop") {
-      if (deepgramLive) deepgramLive.close();
+      try { if (deepgramLive) deepgramLive.close(); } catch {}
       return;
     }
   });
 
-  ws.on("close", () => {
+  ws.on("close", async () => {
     try { if (deepgramLive) deepgramLive.close(); } catch {}
+
+    // Log every call on hangup (best-effort)
+    await writeCallOutcome({
+      callSid,
+      callerPhone,
+      confirmed: !!state.confirmed,
+      outcome: state.confirmed ? "call_completed" : "caller_hung_up",
+      name: state.name,
+      zip: normalizeZip(state.zip),
+      issueCategory: state.issueCategory,
+      issueText: state.issueText,
+      notes: "WS closed (hangup)"
+    });
   });
 });
