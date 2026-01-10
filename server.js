@@ -47,7 +47,7 @@ function extractName(text = "") {
     if (m?.[1]) {
       const extracted = m[1].trim();
       // Make sure it's not a common false positive
-      if (!/^(the|that|this|there|here|what|when|where|how|why)$/i.test(extracted)) {
+      if (!/^(the|that|this|there|here|what|when|where|how|why|my|hi|hello)$/i.test(extracted)) {
         return extracted;
       }
     }
@@ -62,7 +62,7 @@ function extractName(text = "") {
   if (words.length === 1 && words[0].length >= 2 && words[0].length <= 20) {
     const word = words[0];
     // Exclude common words that might be misheard
-    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|can't|don't|won't)$/i.test(word)) {
+    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|can't|don't|won't|hi|hello|hey)$/i.test(word)) {
       return word;
     }
   }
@@ -70,7 +70,7 @@ function extractName(text = "") {
   // Two words - take the first (likely first name)
   if (words.length === 2 && words[0].length >= 2 && words[0].length <= 20) {
     const word = words[0];
-    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|can't|don't|won't)$/i.test(word)) {
+    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|can't|don't|won't|hi|hello|hey)$/i.test(word)) {
       return word;
     }
   }
@@ -88,14 +88,28 @@ function extractCarMakeModel(text = "") {
     .replace(/[^\w\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+  
+  // Don't extract if text is too short or looks like a greeting
+  if (cleaned.length < 5 || /^(hi|hello|hey|my|me|i)\b/i.test(cleaned)) {
+    return "";
+  }
     
   // "1992 Ford Explorer" -> "Ford Explorer"
   const m1 = cleaned.match(/\b(19\d{2}|20[0-2]\d)\s+([A-Za-z]+)\s+([A-Za-z0-9]+)\b/);
   if (m1) return `${m1[2]} ${m1[3]}`.trim();
   
-  // "Ford Explorer"
+  // "Ford Explorer" - but must be car-related words
   const m2 = cleaned.match(/\b([A-Za-z]+)\s+([A-Za-z0-9]+)\b/);
-  if (m2) return `${m2[1]} ${m2[2]}`.trim();
+  if (m2) {
+    const first = m2[1].toLowerCase();
+    const second = m2[2].toLowerCase();
+    // Only return if it looks like a car make/model
+    // Exclude common phrases
+    if (!/^(hi|my|me|the|this|that|is|it|steering|wheel|car|pulling|brake|start)$/i.test(first) &&
+        !/^(hi|my|me|the|this|that|is|it|steering|wheel|car|pulling|brake|start)$/i.test(second)) {
+      return `${m2[1]} ${m2[2]}`.trim();
+    }
+  }
   
   return "";
 }
@@ -263,9 +277,9 @@ const VOICE_GREETING = "Thanks for calling Mass Mechanic. Tell me what's going o
 //────────────────────────────────────────────────────────────────────────────────
 
 function estimateSpeakMs(text = "") {
-  // crude but good enough to avoid talking over the user:
-  // ~15 chars/sec + min clamp
-  const ms = Math.max(900, Math.min(9000, Math.ceil(String(text).length / 15) * 1000));
+  // More conservative timing to avoid cutting off users
+  // ~12 chars/sec (slower) + longer minimum
+  const ms = Math.max(1500, Math.min(10000, Math.ceil(String(text).length / 12) * 1000));
   return ms;
 }
 
@@ -309,16 +323,33 @@ async function transferCallToHuman(callSid) {
   console.log("📞 Call transfer initiated", { callSid, transferUrl });
 }
 
-// call_outcomes: create/update row
+// call_outcomes: create/update row - FIXED to handle missing UNIQUE constraint
 async function upsertCallOutcome({ callSid, patch }) {
   if (!callSid) return;
   try {
-    const { error } = await supabase
+    // First, try to find existing row
+    const { data: existing } = await supabase
       .from("call_outcomes")
-      .upsert({ call_sid: callSid, ...patch }, { onConflict: "call_sid" });
-    if (error) console.error("⚠️ call_outcomes upsert failed:", error.message);
+      .select("call_sid")
+      .eq("call_sid", callSid)
+      .maybeSingle();
+    
+    if (existing) {
+      // Update existing
+      const { error } = await supabase
+        .from("call_outcomes")
+        .update(patch)
+        .eq("call_sid", callSid);
+      if (error) console.error("⚠️ call_outcomes update failed:", error.message);
+    } else {
+      // Insert new
+      const { error } = await supabase
+        .from("call_outcomes")
+        .insert({ call_sid: callSid, ...patch });
+      if (error) console.error("⚠️ call_outcomes insert failed:", error.message);
+    }
   } catch (e) {
-    console.error("⚠️ call_outcomes upsert exception:", e);
+    console.error("⚠️ call_outcomes operation exception:", e);
   }
 }
 
@@ -375,12 +406,13 @@ wss.on("connection", (ws) => {
   let callerPhone = "unknown";
   let callSid = "";
   
-  // Turn-taking / anti-interrupt guardrails
+  // Turn-taking / anti-interrupt guardrails - IMPROVED
   let isSpeaking = false;
   let speakUntilTs = 0;
   let processing = false;
   let pendingFinal = null;
   let lastFinalAt = 0;
+  let lastBotQuestionAt = 0; // Track when bot last asked a question
   
   const state = {
     name: "",
@@ -388,6 +420,7 @@ wss.on("connection", (ws) => {
     issueText: "",
     issueCategory: "general",
     askedFollowup: false,
+    awaitingFollowupResponse: false,
     awaitingConfirmation: false,
     confirmed: false,
     carMakeModel: "",
@@ -445,6 +478,19 @@ wss.on("connection", (ws) => {
       if (processing) return;
       if (isSpeaking && now < speakUntilTs) return;
       
+      // CRITICAL: Add grace period after bot asks a question
+      // Don't process user input for at least 800ms after bot finishes speaking
+      const timeSinceBotQuestion = now - lastBotQuestionAt;
+      if (timeSinceBotQuestion < 800) {
+        // Schedule processing for after grace period
+        setTimeout(() => {
+          if (!processing && !transferred && pendingFinal) {
+            drainPendingFinal();
+          }
+        }, 800 - timeSinceBotQuestion);
+        return;
+      }
+      
       await drainPendingFinal();
     });
     
@@ -467,18 +513,19 @@ wss.on("connection", (ws) => {
     isSpeaking = true;
     const ms = estimateSpeakMs(text);
     speakUntilTs = Date.now() + ms;
+    lastBotQuestionAt = Date.now(); // Track when bot asks a question
     
     const ok = await speakOverStream({ ws, streamSid, text, deepgramKey: DEEPGRAM_API_KEY });
     
     if (!ok) {
       // if TTS fails, stop "speaking" state quickly
-      speakUntilTs = Date.now() + 300;
+      speakUntilTs = Date.now() + 500;
     }
     
-    // Release speaking flag after estimated duration
+    // Release speaking flag after estimated duration + buffer
     setTimeout(() => {
       isSpeaking = false;
-    }, ms);
+    }, ms + 500); // Add 500ms buffer
   }
   
   async function drainPendingFinal() {
@@ -516,7 +563,18 @@ wss.on("connection", (ws) => {
         return;
       }
       
-      // ALWAYS attempt extraction (independent of other heuristics)
+      // If awaiting followup response, prioritize capturing that
+      if (state.awaitingFollowupResponse) {
+        // User is responding to our detailed follow-up question
+        // Don't extract new data, just append to issue description
+        if (text.length > 3) {
+          state.issueText = `${state.issueText}. ${text}`;
+          state.awaitingFollowupResponse = false;
+          console.log(`✅ Added followup details: ${text}`);
+        }
+      }
+      
+      // ALWAYS attempt extraction (but only if not already set)
       if (!state.zip) {
         const z = extractZip(text);
         if (z) {
@@ -623,6 +681,7 @@ wss.on("connection", (ws) => {
       // Deterministic follow-ups to reduce "AI weirdness"
       if (state.issueText && !state.askedFollowup) {
         state.askedFollowup = true;
+        state.awaitingFollowupResponse = true; // Flag that we're waiting for their answer
         const followup = FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general;
         await say(followup);
         return;
@@ -707,7 +766,7 @@ wss.on("connection", (ws) => {
           if (!processing && !(isSpeaking && Date.now() < speakUntilTs)) {
             drainPendingFinal();
           }
-        }, 250);
+        }, 400); // Increased delay
       }
     }
   }
