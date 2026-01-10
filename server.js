@@ -34,11 +34,26 @@ function extractZip(text = "") {
   return m ? m[1] : "";
 }
 
+// NEW: Extract phone number (10 digits)
+function extractPhone(text = "") {
+  // Remove all non-digits
+  const digits = String(text).replace(/\D/g, "");
+  
+  // Look for 10-digit or 11-digit (with 1 prefix) phone numbers
+  if (digits.length === 10) {
+    return digits;
+  }
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return digits.substring(1); // Remove leading 1
+  }
+  
+  return "";
+}
+
 function extractName(text = "") {
   const original = String(text).trim();
   
   // CRITICAL: Don't extract if text contains car problem keywords
-  // This prevents extracting "leaking", "pulling", "grinding" etc as names
   if (/(leak|leaking|pull|pulling|brake|braking|start|starting|overheat|check|engine|noise|rattle|clunk|grind|grinding|squeal|shake|vibration|smoke|stall|idle|rough|slip|slipping|shift|puddle|under)/i.test(original)) {
     return "";
   }
@@ -52,28 +67,23 @@ function extractName(text = "") {
     const m = original.match(pattern);
     if (m?.[1]) {
       const extracted = m[1].trim();
-      // Make sure it's not a common false positive
       if (!/^(the|that|this|there|here|what|when|where|how|why|my|hi|hello|leak|leaking|pull|pulling)$/i.test(extracted)) {
         return extracted;
       }
     }
   }
   
-  // Pattern 2: Just a name by itself (very conservative now)
-  // Remove all non-letter characters except spaces
+  // Pattern 2: Just a name by itself (very conservative)
   const cleaned = original.replace(/[^a-zA-Z\s]/g, '').trim();
   const words = cleaned.split(/\s+/).filter(w => w.length >= 2);
   
-  // Single word that looks like a name (2-15 chars, more strict)
   if (words.length === 1 && words[0].length >= 2 && words[0].length <= 15) {
     const word = words[0];
-    // Much longer exclusion list
     if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke|code|zip)$/i.test(word)) {
       return word;
     }
   }
   
-  // Two words - take the first (likely first name) - but be very strict
   if (words.length === 2 && words[0].length >= 2 && words[0].length <= 15) {
     const word = words[0];
     if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke|code|zip)$/i.test(word)) {
@@ -95,25 +105,19 @@ function extractCarMakeModel(text = "") {
     .replace(/\s+/g, " ")
     .trim();
   
-  // Don't extract if text is too short or contains problem keywords
   if (cleaned.length < 6) return "";
   
-  // Exclude if it contains car problem keywords (these are issue descriptions, not car models)
   if (/(steering|wheel|pull|pulling|brake|start|overheat|check|engine|noise|rattle|clunk|grind|squeal|shake|vibration|leak|leaking|smoke|stall|idle|rough|slipping|shift|puddle)/i.test(cleaned)) {
     return "";
   }
   
-  // Exclude greetings and common phrases
   if (/^(hi|hello|hey|my|me|i|the|this|that|is|it|there)\b/i.test(cleaned)) {
     return "";
   }
     
-  // "1992 Ford Explorer" -> "Ford Explorer"
   const m1 = cleaned.match(/\b(19\d{2}|20[0-2]\d)\s+([A-Za-z]+)\s+([A-Za-z0-9]+)\b/);
   if (m1) return `${m1[2]} ${m1[3]}`.trim();
   
-  // "Ford Explorer" - but must look like a car brand
-  // Common car brands to look for
   const carBrands = /\b(toyota|honda|ford|chevy|chevrolet|gmc|dodge|ram|jeep|nissan|mazda|subaru|hyundai|kia|volkswagen|vw|bmw|mercedes|audi|lexus|acura|infiniti|cadillac|buick|lincoln|volvo|tesla|porsche)\b/i;
   
   if (carBrands.test(cleaned)) {
@@ -125,14 +129,26 @@ function extractCarMakeModel(text = "") {
 }
 
 function speakZipDigits(zip = "") {
-  // 02321 -> "zero two three two one"
   return String(zip)
     .split("")
     .map((d) => (d === "0" ? "zero" : d))
     .join(" ");
 }
 
-// Issue routing (keyword-based; tune freely)
+// NEW: Speak phone number in groups of 3-3-4
+function speakPhoneDigits(phone = "") {
+  const digits = String(phone).replace(/\D/g, "");
+  if (digits.length !== 10) return phone;
+  
+  // Format: (123) 456-7890 -> "1 2 3, 4 5 6, 7 8 9 0"
+  const part1 = digits.substring(0, 3).split("").join(" ");
+  const part2 = digits.substring(3, 6).split("").join(" ");
+  const part3 = digits.substring(6, 10).split("").join(" ");
+  
+  return `${part1}, ${part2}, ${part3}`;
+}
+
+// Issue routing (keyword-based)
 function categorizeIssue(text = "") {
   const t = String(text).toLowerCase();
   
@@ -151,7 +167,7 @@ function categorizeIssue(text = "") {
   return "general";
 }
 
-// Map voice category -> leads.service_type (so you have something consistent)
+// Map voice category -> leads.service_type
 function serviceTypeFromCategory(cat = "general") {
   const map = {
     brakes: "brake-repair",
@@ -282,7 +298,6 @@ app.post("/transfer", (req, res) => {
   `);
 });
 
-// NEW: Endpoint to hangup the call
 app.post("/hangup", (req, res) => {
   res.type("text/xml");
   res.send(`
@@ -292,7 +307,6 @@ app.post("/hangup", (req, res) => {
   `);
 });
 
-// Updated greeting as requested
 const VOICE_GREETING = "Thanks for calling Mass Mechanic — we connect you with trusted local mechanics for fast, free repair quotes. Tell me what's wrong with your car or ask me a quick question.";
 
 //────────────────────────────────────────────────────────────────────────────────
@@ -300,18 +314,15 @@ const VOICE_GREETING = "Thanks for calling Mass Mechanic — we connect you with
 //────────────────────────────────────────────────────────────────────────────────
 
 function estimateSpeakMs(text = "") {
-  // More conservative timing to avoid cutting off users
-  // ~12 chars/sec (slower) + longer minimum
   const ms = Math.max(1500, Math.min(10000, Math.ceil(String(text).length / 12) * 1000));
   return ms;
 }
 
-// Enhanced with retry logic and better error handling
 async function speakOverStream({ ws, streamSid, text, deepgramKey, retries = 2 }) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      const timeout = setTimeout(() => controller.abort(), 10000);
       
       const ttsResponse = await fetch(
         "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none",
@@ -333,7 +344,7 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey, retries = 2 }
         console.error(`❌ TTS Failed (attempt ${attempt + 1}/${retries + 1}):`, ttsResponse.status, errText);
         
         if (attempt < retries) {
-          await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms before retry
+          await new Promise(resolve => setTimeout(resolve, 500));
           continue;
         }
         return false;
@@ -352,7 +363,7 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey, retries = 2 }
       console.error(`❌ TTS Error (attempt ${attempt + 1}/${retries + 1}):`, error.message);
       
       if (attempt < retries) {
-        await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms before retry
+        await new Promise(resolve => setTimeout(resolve, 500));
         continue;
       }
       return false;
@@ -373,7 +384,6 @@ async function transferCallToHuman(callSid) {
   console.log("📞 Call transfer initiated", { callSid, transferUrl });
 }
 
-// NEW: Function to hangup the call
 async function hangupCall(callSid) {
   if (!callSid) return console.error("❌ Missing callSid — cannot hangup");
   
@@ -388,11 +398,9 @@ async function hangupCall(callSid) {
   }
 }
 
-// call_outcomes: create/update row - FIXED to handle missing UNIQUE constraint
 async function upsertCallOutcome({ callSid, patch }) {
   if (!callSid) return;
   try {
-    // First, try to find existing row
     const { data: existing } = await supabase
       .from("call_outcomes")
       .select("call_sid")
@@ -400,14 +408,12 @@ async function upsertCallOutcome({ callSid, patch }) {
       .maybeSingle();
     
     if (existing) {
-      // Update existing
       const { error } = await supabase
         .from("call_outcomes")
         .update(patch)
         .eq("call_sid", callSid);
       if (error) console.error("⚠️ call_outcomes update failed:", error.message);
     } else {
-      // Insert new
       const { error } = await supabase
         .from("call_outcomes")
         .insert({ call_sid: callSid, ...patch });
@@ -418,7 +424,17 @@ async function upsertCallOutcome({ callSid, patch }) {
   }
 }
 
-// Create a lead in Supabase after confirmation - FIXED to use empty string for email
+// NEW: Determine if lead is high-priority based on urgency and drivability
+function isHighPriorityLead(urgency, drivable) {
+  // High priority if:
+  // 1. Urgent (today/ASAP) OR
+  // 2. Not drivable
+  const isUrgent = /today|asap|now|immediately|urgent|soon|right away/i.test(urgency || "");
+  const notDrivable = /no|not drivable|can't drive|cant drive|wont move|stuck/i.test(drivable || "");
+  
+  return isUrgent || notDrivable;
+}
+
 async function createLeadFromCall({ callerPhone, state }) {
   try {
     const payload = {
@@ -428,8 +444,8 @@ async function createLeadFromCall({ callerPhone, state }) {
       car_year: state.carYear || null,
       description: state.issueText || "",
       name: state.name || null,
-      phone: callerPhone || null,
-      email: "", // CHANGED: Use empty string instead of null for NOT NULL constraint
+      phone: state.phone || callerPhone || null, // Use explicit phone first, fallback to caller ID
+      email: "",
       lead_source: "voice",
       status: "new",
       lead_category: "repair",
@@ -442,6 +458,21 @@ async function createLeadFromCall({ callerPhone, state }) {
     if (error) {
       console.error("❌ Lead insert failed:", error.message);
       return { ok: false, error: error.message };
+    }
+    
+    console.log("✅ Lead created:", data);
+    
+    // NEW: Call appropriate edge function based on urgency/drivability
+    const isHighPriority = isHighPriorityLead(state.urgency_window, state.drivable);
+    
+    if (isHighPriority) {
+      console.log("📤 Dispatching HIGH PRIORITY lead to mechanics via send-lead");
+      // Call your send-lead edge function
+      // await fetch(`${SUPABASE_URL}/functions/v1/send-lead`, { ... });
+    } else {
+      console.log("📤 Dispatching maintenance lead to mechanics via send-maintenance-lead");
+      // Call your send-maintenance-lead edge function
+      // await fetch(`${SUPABASE_URL}/functions/v1/send-maintenance-lead`, { ... });
     }
     
     return { ok: true, lead: data };
@@ -472,43 +503,40 @@ wss.on("connection", (ws) => {
   let callerPhone = "unknown";
   let callSid = "";
   
-  // Turn-taking / anti-interrupt guardrails - IMPROVED
   let isSpeaking = false;
   let speakUntilTs = 0;
   let processing = false;
   let pendingFinal = null;
   let lastFinalAt = 0;
-  let lastBotQuestionAt = 0; // Track when bot last asked a question
+  let lastBotQuestionAt = 0;
   
   const state = {
     name: "",
     zip: "",
+    phone: "", // NEW: Explicit phone number
     issueText: "",
     issueCategory: "general",
     askedFollowup: false,
     awaitingFollowupResponse: false,
     awaitingConfirmation: false,
-    awaitingCorrectionChoice: false, // waiting for user to say what to correct
-    correctingField: null, // which field we're correcting (zip, name, car, issue)
+    awaitingCorrectionChoice: false,
+    correctingField: null,
     confirmed: false,
     carMakeModel: "",
     carYear: "",
-    drivable: "",
-    urgency_window: "",
+    drivable: "", // NEW: Is the car drivable?
+    urgency_window: "", // NEW: When do they need service?
     leadCreated: false,
-    // Track which step we're on to prevent wrong extractions
-    currentStep: "issue", // issue, followup, car, name, zip, confirm
+    currentStep: "issue", // issue, followup, car, name, zip, phone, urgency, drivable, confirm
   };
   
-  // Keep GPT as "backup"
   const messages = [
     {
       role: "system",
       content:
         "You are the MassMechanic phone agent. Keep replies SHORT (1 sentence). Ask ONE question at a time. " +
-        "Goal: collect (1) what's wrong, (2) car make/model/year, (3) first name, (4) ZIP code. " +
-        "Do NOT ask for last name. Do NOT end the call until you confirm the details. " +
-        "If user says 'no' to confirmation, ask what to correct and then re-confirm.",
+        "Goal: collect (1) what's wrong, (2) car make/model/year, (3) first name, (4) ZIP code, (5) phone number, (6) urgency, (7) drivability. " +
+        "Do NOT ask for last name. Do NOT end the call until you confirm the details.",
     },
   ];
   
@@ -533,26 +561,20 @@ wss.on("connection", (ws) => {
       const transcript = received.channel?.alternatives?.[0]?.transcript;
       if (!transcript) return;
       
-      // Only act on final transcripts
       if (!received.is_final) return;
       
       const text = transcript.trim();
       if (!text) return;
       
-      // Debounce / prevent rapid-fire finals causing talk-over
       const now = Date.now();
       lastFinalAt = now;
       pendingFinal = text;
       
-      // If currently speaking or processing, wait and process latest
       if (processing) return;
       if (isSpeaking && now < speakUntilTs) return;
       
-      // CRITICAL: Add grace period after bot asks a question
-      // Don't process user input for at least 800ms after bot finishes speaking
       const timeSinceBotQuestion = now - lastBotQuestionAt;
       if (timeSinceBotQuestion < 800) {
-        // Schedule processing for after grace period
         setTimeout(() => {
           if (!processing && !transferred && pendingFinal) {
             drainPendingFinal();
@@ -570,8 +592,15 @@ wss.on("connection", (ws) => {
   setupDeepgram();
   
   function readyToConfirm() {
-    // Require carMakeModel so lead insert doesn't violate NOT NULL
-    return Boolean(state.issueText && state.carMakeModel && state.name && state.zip);
+    return Boolean(
+      state.issueText && 
+      state.carMakeModel && 
+      state.name && 
+      state.zip && 
+      state.phone && 
+      state.urgency_window && 
+      state.drivable
+    );
   }
   
   async function say(text) {
@@ -579,24 +608,21 @@ wss.on("connection", (ws) => {
     
     console.log(`🤖 Bot: ${text}`);
     
-    // Mark speaking to reduce user-talk-over
     isSpeaking = true;
     const ms = estimateSpeakMs(text);
     speakUntilTs = Date.now() + ms;
-    lastBotQuestionAt = Date.now(); // Track when bot asks a question
+    lastBotQuestionAt = Date.now();
     
     const ok = await speakOverStream({ ws, streamSid, text, deepgramKey: DEEPGRAM_API_KEY });
     
     if (!ok) {
-      // if TTS fails, stop "speaking" state quickly
       speakUntilTs = Date.now() + 500;
       console.error("❌ TTS completely failed after retries");
     }
     
-    // Release speaking flag after estimated duration + buffer
     setTimeout(() => {
       isSpeaking = false;
-    }, ms + 500); // Add 500ms buffer
+    }, ms + 500);
   }
   
   async function drainPendingFinal() {
@@ -604,7 +630,6 @@ wss.on("connection", (ws) => {
     processing = true;
     
     try {
-      // Grab the most recent final utterance and clear queue
       const text = pendingFinal;
       pendingFinal = null;
       
@@ -634,13 +659,13 @@ wss.on("connection", (ws) => {
         return;
       }
       
-      // Handle correction choice (user telling us what to fix)
+      // Handle correction choice
       if (state.awaitingCorrectionChoice) {
         const lower = text.toLowerCase();
         
         if (/(zip|zip code|zipcode)/i.test(lower)) {
           state.correctingField = "zip";
-          state.zip = ""; // Clear the field
+          state.zip = "";
           state.currentStep = "zip";
           state.awaitingCorrectionChoice = false;
           await say("Okay, what's your 5-digit ZIP code?");
@@ -649,7 +674,7 @@ wss.on("connection", (ws) => {
         
         if (/(name|first name)/i.test(lower)) {
           state.correctingField = "name";
-          state.name = ""; // Clear the field
+          state.name = "";
           state.currentStep = "name";
           state.awaitingCorrectionChoice = false;
           await say("Okay, what's your first name?");
@@ -658,8 +683,8 @@ wss.on("connection", (ws) => {
         
         if (/(car|vehicle|make|model)/i.test(lower)) {
           state.correctingField = "car";
-          state.carMakeModel = ""; // Clear the field
-          state.carYear = ""; // Also clear year
+          state.carMakeModel = "";
+          state.carYear = "";
           state.currentStep = "car";
           state.awaitingCorrectionChoice = false;
           await say("Okay, what's the make and model of your car?");
@@ -668,53 +693,84 @@ wss.on("connection", (ws) => {
         
         if (/(issue|problem|wrong)/i.test(lower)) {
           state.correctingField = "issue";
-          state.issueText = ""; // Clear the field
+          state.issueText = "";
           state.currentStep = "issue";
           state.awaitingCorrectionChoice = false;
           await say("Okay, tell me what's wrong with your car.");
           return;
         }
         
-        // If unclear, ask again
-        await say("Sorry, I didn't catch that. Would you like to correct your ZIP code, your name, the car, or the issue?");
+        // NEW: Allow correcting phone, urgency, drivability
+        if (/(phone|number|telephone)/i.test(lower)) {
+          state.correctingField = "phone";
+          state.phone = "";
+          state.currentStep = "phone";
+          state.awaitingCorrectionChoice = false;
+          await say("Okay, what's your 10-digit phone number? Say the digits slowly, three at a time.");
+          return;
+        }
+        
+        if (/(urgency|when|time)/i.test(lower)) {
+          state.correctingField = "urgency";
+          state.urgency_window = "";
+          state.currentStep = "urgency";
+          state.awaitingCorrectionChoice = false;
+          await say("Okay, when do you need the repair done?");
+          return;
+        }
+        
+        if (/(drivable|drive|driving)/i.test(lower)) {
+          state.correctingField = "drivable";
+          state.drivable = "";
+          state.currentStep = "drivable";
+          state.awaitingCorrectionChoice = false;
+          await say("Okay, can you drive the car, or does it need to be towed?");
+          return;
+        }
+        
+        await say("Sorry, I didn't catch that. What would you like to correct?");
         return;
       }
       
-      // If awaiting followup response, prioritize capturing that
+      // If awaiting followup response
       if (state.awaitingFollowupResponse) {
-        // User is responding to our detailed follow-up question
-        // Don't extract new data, just append to issue description
         if (text.length > 3) {
           state.issueText = `${state.issueText}. ${text}`;
           state.awaitingFollowupResponse = false;
-          state.currentStep = "car"; // Move to next step
+          state.currentStep = "car";
           console.log(`✅ Added followup details: ${text}`);
         }
       }
       
-      // Extract data based on current step to prevent wrong extractions
+      // Extract based on current step
       
-      // Only extract ZIP when we're on the zip step
       if (state.currentStep === "zip" && !state.zip) {
         const z = extractZip(text);
         if (z) {
           state.zip = z;
-          state.correctingField = null; // Done correcting
+          state.correctingField = null;
           console.log(`✅ Extracted ZIP: ${z}`);
         }
       }
       
-      // Only extract name when we're on the name step
+      if (state.currentStep === "phone" && !state.phone) {
+        const p = extractPhone(text);
+        if (p) {
+          state.phone = p;
+          state.correctingField = null;
+          console.log(`✅ Extracted phone: ${p}`);
+        }
+      }
+      
       if (state.currentStep === "name" && !state.name) {
         const n = extractName(text);
         if (n) {
           state.name = n;
-          state.correctingField = null; // Done correcting
+          state.correctingField = null;
           console.log(`✅ Extracted name: ${n}`);
         }
       }
       
-      // Only extract car when we're on the car step
       if (state.currentStep === "car") {
         if (!state.carYear) {
           const y = extractCarYear(text);
@@ -728,37 +784,47 @@ wss.on("connection", (ws) => {
           const mm = extractCarMakeModel(text);
           if (mm) {
             state.carMakeModel = mm;
-            state.correctingField = null; // Done correcting
+            state.correctingField = null;
             console.log(`✅ Extracted car: ${mm}`);
           }
         }
       }
       
-      // Capture issueText once (avoid overwriting with name/zip)
       if (state.currentStep === "issue" && !state.issueText) {
         const z = extractZip(text);
         const n = extractName(text);
         
-        // If utterance is not just zip/name, treat as issue
         if (!z && !n && text.length > 6) {
           state.issueText = text;
           state.issueCategory = categorizeIssue(text);
-          state.correctingField = null; // Done correcting
+          state.correctingField = null;
           console.log(`✅ Captured issue: ${text} (category: ${state.issueCategory})`);
         }
       }
       
-      // If awaiting confirmation, handle yes/no deterministically
+      // NEW: Capture urgency and drivability
+      if (state.currentStep === "urgency" && !state.urgency_window) {
+        state.urgency_window = text;
+        state.correctingField = null;
+        console.log(`✅ Captured urgency: ${text}`);
+      }
+      
+      if (state.currentStep === "drivable" && !state.drivable) {
+        state.drivable = text;
+        state.correctingField = null;
+        console.log(`✅ Captured drivability: ${text}`);
+      }
+      
+      // Confirmation handling
       if (state.awaitingConfirmation && !state.confirmed) {
         if (looksLikeYes(text)) {
           state.confirmed = true;
           state.awaitingConfirmation = false;
           
-          // Log call_outcomes (confirmed)
           await upsertCallOutcome({
             callSid,
             patch: {
-              caller_phone: callerPhone,
+              caller_phone: state.phone || callerPhone,
               name: state.name || null,
               zip_code: state.zip || null,
               issue_text: state.issueText || null,
@@ -770,7 +836,6 @@ wss.on("connection", (ws) => {
             },
           });
           
-          // Create lead (if not created already)
           if (!state.leadCreated) {
             const leadRes = await createLeadFromCall({ callerPhone, state });
             if (leadRes.ok) {
@@ -783,7 +848,6 @@ wss.on("connection", (ws) => {
             `Perfect — thanks, ${state.name}. We'll connect you with a trusted local mechanic near ZIP ${speakZipDigits(state.zip)}.`
           );
           
-          // NEW: Hangup after 2 seconds to let the message finish
           setTimeout(async () => {
             console.log("📞 Initiating call hangup after confirmation");
             await hangupCall(callSid);
@@ -796,26 +860,23 @@ wss.on("connection", (ws) => {
         
         if (looksLikeNo(text)) {
           state.awaitingConfirmation = false;
-          state.awaitingCorrectionChoice = true; // Set flag to wait for correction choice
-          await say("No problem — what should I correct: your ZIP code, your name, the car, or the issue?");
+          state.awaitingCorrectionChoice = true;
+          await say("No problem — what should I correct?");
           return;
         }
         
-        // If unclear response during confirmation, ask again
         await say("Sorry, I didn't catch that. Is that information correct?");
         return;
       }
       
-      // UPDATED FLOW ORDER: issue -> followup -> car -> name -> zip -> confirm
+      // UPDATED FLOW: issue -> followup -> car -> name -> zip -> phone -> urgency -> drivable -> confirm
       
-      // Step 1: Get the issue
       if (!state.issueText) {
         state.currentStep = "issue";
         await say("Tell me what's wrong with your car.");
         return;
       }
       
-      // Step 2: Ask follow-up about the issue
       if (state.issueText && !state.askedFollowup) {
         state.askedFollowup = true;
         state.awaitingFollowupResponse = true;
@@ -825,40 +886,59 @@ wss.on("connection", (ws) => {
         return;
       }
       
-      // Step 3: Get car make/model/year
       if (!state.carMakeModel) {
         state.currentStep = "car";
         await say("What's the make and model of your car?");
         return;
       }
       
-      // Step 4: Get name
       if (!state.name) {
         state.currentStep = "name";
         await say("And what's your first name?");
         return;
       }
       
-      // Step 5: Get ZIP code
       if (!state.zip) {
         state.currentStep = "zip";
         await say("What's your 5-digit ZIP code?");
         return;
       }
       
-      // Step 6: Confirmation (or re-confirmation after correction)
+      // NEW: Ask for phone number explicitly
+      if (!state.phone) {
+        state.currentStep = "phone";
+        await say("And what's your 10-digit phone number? Say the digits slowly, three at a time.");
+        return;
+      }
+      
+      // NEW: Ask about urgency
+      if (!state.urgency_window) {
+        state.currentStep = "urgency";
+        await say("When do you need the repair done — today, within a few days, or next week?");
+        return;
+      }
+      
+      // NEW: Ask if car is drivable
+      if (!state.drivable) {
+        state.currentStep = "drivable";
+        await say("Can you drive the car to a shop, or does it need to be towed?");
+        return;
+      }
+      
+      // Confirmation
       if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
         state.awaitingConfirmation = true;
         state.currentStep = "confirm";
         const zipSpoken = speakZipDigits(state.zip);
+        const phoneSpoken = speakPhoneDigits(state.phone);
         const carSpoken = `${state.carYear ? state.carYear + " " : ""}${state.carMakeModel}`.trim();
         await say(
-          `To confirm: you're in ZIP ${zipSpoken}, the car is a ${carSpoken}, and the issue is "${state.issueText}". Is that right?`
+          `To confirm: you're ${state.name} in ZIP ${zipSpoken}, phone ${phoneSpoken}, the car is a ${carSpoken}, and the issue is "${state.issueText}". Is that right?`
         );
         return;
       }
       
-      // Backup GPT only if we somehow get here (should be rare)
+      // Backup GPT
       messages.push({ role: "user", content: text });
       
       const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -871,8 +951,8 @@ wss.on("connection", (ws) => {
             {
               role: "system",
               content:
-                `State: name="${state.name}", zip="${state.zip}", car="${state.carYear} ${state.carMakeModel}", ` +
-                `issue="${state.issueText}", category="${state.issueCategory}". ` +
+                `State: name="${state.name}", zip="${state.zip}", phone="${state.phone}", car="${state.carYear} ${state.carMakeModel}", ` +
+                `issue="${state.issueText}", urgency="${state.urgency_window}", drivable="${state.drivable}". ` +
                 `Ask ONE short question that collects missing info or confirms details. Do not ask last name.`,
             },
           ],
@@ -899,13 +979,12 @@ wss.on("connection", (ws) => {
     } finally {
       processing = false;
       
-      // If another final came in while processing, handle it now (latest wins)
       if (pendingFinal && !transferred) {
         setTimeout(() => {
           if (!processing && !(isSpeaking && Date.now() < speakUntilTs)) {
             drainPendingFinal();
           }
-        }, 400); // Increased delay
+        }, 400);
       }
     }
   }
@@ -928,7 +1007,6 @@ wss.on("connection", (ws) => {
       
       console.log("☎️ Stream start", { streamSid, callSid, callerPhone });
       
-      // Create/initialize call_outcomes row
       await upsertCallOutcome({
         callSid,
         patch: {
@@ -953,11 +1031,10 @@ wss.on("connection", (ws) => {
     }
     
     if (data.event === "stop") {
-      // Finalize call outcome if still in progress
       await upsertCallOutcome({
         callSid,
         patch: {
-          caller_phone: callerPhone,
+          caller_phone: state.phone || callerPhone,
           name: state.name || null,
           zip_code: state.zip || null,
           issue_text: state.issueText || null,
@@ -977,11 +1054,10 @@ wss.on("connection", (ws) => {
   ws.on("close", async () => {
     try { if (deepgramLive) deepgramLive.close(); } catch {}
     
-    // Best-effort finalize if socket closes unexpectedly
     await upsertCallOutcome({
       callSid,
       patch: {
-        caller_phone: callerPhone,
+        caller_phone: state.phone || callerPhone,
         name: state.name || null,
         zip_code: state.zip || null,
         issue_text: state.issueText || null,
@@ -994,3 +1070,4 @@ wss.on("connection", (ws) => {
     });
   });
 });
+
