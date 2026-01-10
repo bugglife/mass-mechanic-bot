@@ -29,22 +29,32 @@ function looksLikeNo(text = "") {
   return /^(no|nope|not really|nah|wrong|incorrect)\b/i.test(text.trim());
 }
 
+// NEW: Preprocess text to replace "o" with "0" for number extraction
+function normalizeNumberText(text = "") {
+  // Replace letter O with zero when it appears in number contexts
+  // "oh" or "o" followed by digits or spaces between digits
+  return String(text)
+    .replace(/\boh\b/gi, "0")  // "oh" -> "0"
+    .replace(/\bo\b/gi, "0");   // "o" -> "0"
+}
+
 function extractZip(text = "") {
-  const m = String(text).match(/\b(\d{5})(?:-\d{4})?\b/);
+  // NEW: Normalize o/oh to 0 first
+  const normalized = normalizeNumberText(text);
+  const m = normalized.match(/\b(\d{5})(?:-\d{4})?\b/);
   return m ? m[1] : "";
 }
 
-// NEW: Extract phone number (10 digits)
 function extractPhone(text = "") {
-  // Remove all non-digits
-  const digits = String(text).replace(/\D/g, "");
+  // NEW: Normalize o/oh to 0 first
+  const normalized = normalizeNumberText(text);
+  const digits = normalized.replace(/\D/g, "");
   
-  // Look for 10-digit or 11-digit (with 1 prefix) phone numbers
   if (digits.length === 10) {
     return digits;
   }
   if (digits.length === 11 && digits.startsWith("1")) {
-    return digits.substring(1); // Remove leading 1
+    return digits.substring(1);
   }
   
   return "";
@@ -53,12 +63,10 @@ function extractPhone(text = "") {
 function extractName(text = "") {
   const original = String(text).trim();
   
-  // CRITICAL: Don't extract if text contains car problem keywords
   if (/(leak|leaking|pull|pulling|brake|braking|start|starting|overheat|check|engine|noise|rattle|clunk|grind|grinding|squeal|shake|vibration|smoke|stall|idle|rough|slip|slipping|shift|puddle|under)/i.test(original)) {
     return "";
   }
   
-  // Pattern 1: "My name is ___", "This is ___", "I'm ___", "It's ___", "Call me ___"
   const patterns = [
     /(?:my name is|my name's|this is|i'm|im|i am|it'?s|call me|they call me)\s+([a-z]{2,}(?:\s+[a-z]+)?)\b/i,
   ];
@@ -73,7 +81,6 @@ function extractName(text = "") {
     }
   }
   
-  // Pattern 2: Just a name by itself (very conservative)
   const cleaned = original.replace(/[^a-zA-Z\s]/g, '').trim();
   const words = cleaned.split(/\s+/).filter(w => w.length >= 2);
   
@@ -135,20 +142,17 @@ function speakZipDigits(zip = "") {
     .join(" ");
 }
 
-// NEW: Speak phone number in groups of 3-3-4
 function speakPhoneDigits(phone = "") {
   const digits = String(phone).replace(/\D/g, "");
   if (digits.length !== 10) return phone;
   
-  // Format: (123) 456-7890 -> "1 2 3, 4 5 6, 7 8 9 0"
-  const part1 = digits.substring(0, 3).split("").join(" ");
-  const part2 = digits.substring(3, 6).split("").join(" ");
-  const part3 = digits.substring(6, 10).split("").join(" ");
+  const part1 = digits.substring(0, 3).split("").map(d => d === "0" ? "zero" : d).join(" ");
+  const part2 = digits.substring(3, 6).split("").map(d => d === "0" ? "zero" : d).join(" ");
+  const part3 = digits.substring(6, 10).split("").map(d => d === "0" ? "zero" : d).join(" ");
   
   return `${part1}, ${part2}, ${part3}`;
 }
 
-// Issue routing (keyword-based)
 function categorizeIssue(text = "") {
   const t = String(text).toLowerCase();
   
@@ -167,7 +171,6 @@ function categorizeIssue(text = "") {
   return "general";
 }
 
-// Map voice category -> leads.service_type
 function serviceTypeFromCategory(cat = "general") {
   const map = {
     brakes: "brake-repair",
@@ -424,15 +427,19 @@ async function upsertCallOutcome({ callSid, patch }) {
   }
 }
 
-// NEW: Determine if lead is high-priority based on urgency and drivability
+// UPDATED: More conservative priority logic
 function isHighPriorityLead(urgency, drivable) {
-  // High priority if:
-  // 1. Urgent (today/ASAP) OR
-  // 2. Not drivable
-  const isUrgent = /today|asap|now|immediately|urgent|soon|right away/i.test(urgency || "");
-  const notDrivable = /no|not drivable|can't drive|cant drive|wont move|stuck/i.test(drivable || "");
+  // High priority ONLY if:
+  // 1. Extremely urgent (ASAP, right now, immediately, stranded, emergency) OR
+  // 2. Not drivable (needs towing)
   
-  return isUrgent || notDrivable;
+  const isExtremelyUrgent = /(asap|right now|immediately|urgent|emergency|stranded|stuck|need help now|breaking down)/i.test(urgency || "");
+  const notDrivable = /(no|not drivable|can't drive|cant drive|wont move|stuck|needs tow|need.*tow|stranded)/i.test(drivable || "");
+  
+  // "Today" alone is not enough for high priority - they need to say it's urgent/ASAP
+  // Being drivable + regular urgency = low priority (maintenance path)
+  
+  return isExtremelyUrgent || notDrivable;
 }
 
 async function createLeadFromCall({ callerPhone, state }) {
@@ -444,7 +451,7 @@ async function createLeadFromCall({ callerPhone, state }) {
       car_year: state.carYear || null,
       description: state.issueText || "",
       name: state.name || null,
-      phone: state.phone || callerPhone || null, // Use explicit phone first, fallback to caller ID
+      phone: state.phone || callerPhone || null,
       email: "",
       lead_source: "voice",
       status: "new",
@@ -462,16 +469,15 @@ async function createLeadFromCall({ callerPhone, state }) {
     
     console.log("✅ Lead created:", data);
     
-    // NEW: Call appropriate edge function based on urgency/drivability
     const isHighPriority = isHighPriorityLead(state.urgency_window, state.drivable);
     
     if (isHighPriority) {
       console.log("📤 Dispatching HIGH PRIORITY lead to mechanics via send-lead");
-      // Call your send-lead edge function
+      // TODO: Call your send-lead edge function
       // await fetch(`${SUPABASE_URL}/functions/v1/send-lead`, { ... });
     } else {
-      console.log("📤 Dispatching maintenance lead to mechanics via send-maintenance-lead");
-      // Call your send-maintenance-lead edge function
+      console.log("📤 Dispatching MAINTENANCE lead to mechanics via send-maintenance-lead");
+      // TODO: Call your send-maintenance-lead edge function
       // await fetch(`${SUPABASE_URL}/functions/v1/send-maintenance-lead`, { ... });
     }
     
@@ -513,7 +519,7 @@ wss.on("connection", (ws) => {
   const state = {
     name: "",
     zip: "",
-    phone: "", // NEW: Explicit phone number
+    phone: "",
     issueText: "",
     issueCategory: "general",
     askedFollowup: false,
@@ -524,10 +530,10 @@ wss.on("connection", (ws) => {
     confirmed: false,
     carMakeModel: "",
     carYear: "",
-    drivable: "", // NEW: Is the car drivable?
-    urgency_window: "", // NEW: When do they need service?
+    drivable: "",
+    urgency_window: "",
     leadCreated: false,
-    currentStep: "issue", // issue, followup, car, name, zip, phone, urgency, drivable, confirm
+    currentStep: "issue",
   };
   
   const messages = [
@@ -635,7 +641,6 @@ wss.on("connection", (ws) => {
       
       console.log(`🗣 User: ${text}`);
       
-      // Human escalation
       if (wantsHumanFromText(text)) {
         transferred = true;
         await upsertCallOutcome({
@@ -659,7 +664,6 @@ wss.on("connection", (ws) => {
         return;
       }
       
-      // Handle correction choice
       if (state.awaitingCorrectionChoice) {
         const lower = text.toLowerCase();
         
@@ -700,7 +704,6 @@ wss.on("connection", (ws) => {
           return;
         }
         
-        // NEW: Allow correcting phone, urgency, drivability
         if (/(phone|number|telephone)/i.test(lower)) {
           state.correctingField = "phone";
           state.phone = "";
@@ -732,7 +735,6 @@ wss.on("connection", (ws) => {
         return;
       }
       
-      // If awaiting followup response
       if (state.awaitingFollowupResponse) {
         if (text.length > 3) {
           state.issueText = `${state.issueText}. ${text}`;
@@ -741,8 +743,6 @@ wss.on("connection", (ws) => {
           console.log(`✅ Added followup details: ${text}`);
         }
       }
-      
-      // Extract based on current step
       
       if (state.currentStep === "zip" && !state.zip) {
         const z = extractZip(text);
@@ -802,7 +802,6 @@ wss.on("connection", (ws) => {
         }
       }
       
-      // NEW: Capture urgency and drivability
       if (state.currentStep === "urgency" && !state.urgency_window) {
         state.urgency_window = text;
         state.correctingField = null;
@@ -815,7 +814,6 @@ wss.on("connection", (ws) => {
         console.log(`✅ Captured drivability: ${text}`);
       }
       
-      // Confirmation handling
       if (state.awaitingConfirmation && !state.confirmed) {
         if (looksLikeYes(text)) {
           state.confirmed = true;
@@ -844,16 +842,19 @@ wss.on("connection", (ws) => {
             }
           }
           
+          // UPDATED: Better goodbye message with more time before hangup
+          const zipSpoken = speakZipDigits(state.zip);
           await say(
-            `Perfect — thanks, ${state.name}. We'll connect you with a trusted local mechanic near ZIP ${speakZipDigits(state.zip)}.`
+            `Perfect — thanks, ${state.name}. We'll connect you with a trusted local mechanic near ZIP ${zipSpoken}. A mechanic will contact you shortly. Thanks for calling Mass Mechanic. Goodbye!`
           );
           
+          // UPDATED: Wait 4 seconds instead of 2 to let full message play
           setTimeout(async () => {
             console.log("📞 Initiating call hangup after confirmation");
             await hangupCall(callSid);
             try { if (deepgramLive) deepgramLive.close(); } catch {}
             try { ws.close(); } catch {}
-          }, 2000);
+          }, 4000);
           
           return;
         }
@@ -868,8 +869,6 @@ wss.on("connection", (ws) => {
         await say("Sorry, I didn't catch that. Is that information correct?");
         return;
       }
-      
-      // UPDATED FLOW: issue -> followup -> car -> name -> zip -> phone -> urgency -> drivable -> confirm
       
       if (!state.issueText) {
         state.currentStep = "issue";
@@ -904,28 +903,24 @@ wss.on("connection", (ws) => {
         return;
       }
       
-      // NEW: Ask for phone number explicitly
       if (!state.phone) {
         state.currentStep = "phone";
         await say("And what's your 10-digit phone number? Say the digits slowly, three at a time.");
         return;
       }
       
-      // NEW: Ask about urgency
       if (!state.urgency_window) {
         state.currentStep = "urgency";
         await say("When do you need the repair done — today, within a few days, or next week?");
         return;
       }
       
-      // NEW: Ask if car is drivable
       if (!state.drivable) {
         state.currentStep = "drivable";
         await say("Can you drive the car to a shop, or does it need to be towed?");
         return;
       }
       
-      // Confirmation
       if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
         state.awaitingConfirmation = true;
         state.currentStep = "confirm";
@@ -938,7 +933,6 @@ wss.on("connection", (ws) => {
         return;
       }
       
-      // Backup GPT
       messages.push({ role: "user", content: text });
       
       const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -1070,4 +1064,3 @@ wss.on("connection", (ws) => {
     });
   });
 });
-
