@@ -564,4 +564,145 @@ wss.on("connection", (ws) => {
             notes: "Customer confirmed name/zip/issue on voice call"
           });
 
-          await createVoiceLe
+          await createVoiceLeadAndDispatch();
+
+          const closing = `Perfect — thanks ${state.name || ""}. We’ll connect you with a local mechanic near ${state.zip}.`;
+          messages.push({ role: "assistant", content: closing });
+          await speakOverStreamWithLock(closing);
+          return;
+        }
+
+        if (looksLikeNo(text)) {
+          state.awaitingConfirmation = false;
+
+          await writeCallOutcome({
+            confirmed: false,
+            outcome: "needs_correction",
+            notes: "Customer said confirmation was incorrect"
+          });
+
+          const fix = "No problem — what should I correct: your ZIP code, your name, or the issue?";
+          messages.push({ role: "assistant", content: fix });
+          await speakOverStreamWithLock(fix);
+          return;
+        }
+        // if unclear, fall through to GPT
+      }
+
+      messages.push({ role: "user", content: text });
+
+      // Deterministic follow-up once issue captured
+      if (state.issueText && !state.askedFollowup) {
+        state.askedFollowup = true;
+        const followup = FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general;
+        messages.push({ role: "assistant", content: followup });
+        await speakOverStreamWithLock(followup);
+        return;
+      }
+
+      // Force confirmation when ready
+      if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
+        state.awaitingConfirmation = true;
+        const confirmLine = `To confirm, you're in ZIP ${state.zip} and the issue is: ${state.issueText}. Is that right?`;
+        messages.push({ role: "assistant", content: confirmLine });
+        await speakOverStreamWithLock(confirmLine);
+        return;
+      }
+
+      // Otherwise, use GPT to continue
+      const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          messages: [
+            ...messages,
+            {
+              role: "system",
+              content:
+                `Context (internal): name="${state.name}", zip="${state.zip}", issue_category="${state.issueCategory}", ` +
+                `issue_text="${state.issueText}", askedFollowup=${state.askedFollowup}, awaitingConfirmation=${state.awaitingConfirmation}. ` +
+                `Ask EXACTLY ONE short question that helps collect missing details. Do not ask two questions.`
+            }
+          ],
+          max_tokens: 120
+        })
+      });
+
+      const gptJson = await gpt.json();
+
+      // Handle quota/rate-limit gracefully
+      if (!gpt.ok) {
+        console.error("❌ OpenAI error:", gpt.status, gptJson);
+        const fallback =
+          "I’m having a quick technical issue. Please visit massmechananic.com to submit your request, or text us your ZIP and the issue and we’ll follow up.";
+        await speakOverStreamWithLock(fallback);
+        await writeCallOutcome({
+          confirmed: false,
+          outcome: "ai_error",
+          notes: `OpenAI error status=${gpt.status}`
+        });
+        return;
+      }
+
+      let aiText = gptJson?.choices?.[0]?.message?.content?.trim();
+      aiText = enforceOneQuestion(aiText || "");
+
+      if (!aiText) {
+        const fallback =
+          "I’m having a quick technical issue. Please visit massmechananic.com to submit your request, or text us your ZIP and the issue and we’ll follow up.";
+        await speakOverStreamWithLock(fallback);
+        await writeCallOutcome({
+          confirmed: false,
+          outcome: "empty_ai",
+          notes: "No AI text returned"
+        });
+        return;
+      }
+
+      console.log(`🤖 AI: ${aiText}`);
+      messages.push({ role: "assistant", content: aiText });
+      await speakOverStreamWithLock(aiText);
+    } catch (e) {
+      console.error("AI/TTS Error:", e);
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  ws.on("message", async (msg) => {
+    const data = JSON.parse(msg);
+
+    if (data.event === "start") {
+      streamSid = data.start.streamSid;
+      const params = data.start?.customParameters || {};
+      const pFrom = normalizePhone(params.from || "");
+      const pCaller = normalizePhone(params.caller || "");
+      callerPhone = pFrom || pCaller || "unknown";
+      callSid = params.callSid || data.start.callSid || callSid;
+
+      console.log("☎️ Stream start", { streamSid, callSid, callerPhone });
+
+      if (!greeted) {
+        greeted = true;
+        messages.push({ role: "assistant", content: VOICE_GREETING });
+        await speakOverStreamWithLock(VOICE_GREETING);
+      }
+      return;
+    }
+
+    if (data.event === "media" && deepgramLive?.readyState === WebSocket.OPEN) {
+      deepgramLive.send(Buffer.from(data.media.payload, "base64"));
+      return;
+    }
+
+    if (data.event === "stop") {
+      if (deepgramLive) deepgramLive.close();
+      return;
+    }
+  });
+
+  ws.on("close", () => {
+    try { if (deepgramLive) deepgramLive.close(); } catch {}
+  });
+});
