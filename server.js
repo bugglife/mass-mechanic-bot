@@ -5,9 +5,10 @@ import twilio from "twilio";
 import WebSocket, { WebSocketServer } from "ws";
 import fetch from "node-fetch";
 
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
 // 0) HELPERS
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
+
 function normalizePhone(phone = "") {
   const digits = String(phone).replace(/\D/g, "");
   if (!digits) return "";
@@ -21,11 +22,11 @@ function wantsHumanFromText(text = "") {
 }
 
 function looksLikeYes(text = "") {
-  return /^(yes|yeah|yep|correct|right|that’s right|thats right|affirmative|sure|ok|okay)\b/i.test(text.trim());
+  return /^(yes|yeah|yep|yup|correct|right|that's right|thats right|affirmative|sure|ok|okay|mhm|uh huh)\b/i.test(text.trim());
 }
 
 function looksLikeNo(text = "") {
-  return /^(no|nope|not really|wrong|incorrect)\b/i.test(text.trim());
+  return /^(no|nope|not really|nah|wrong|incorrect)\b/i.test(text.trim());
 }
 
 function extractZip(text = "") {
@@ -34,22 +35,47 @@ function extractZip(text = "") {
 }
 
 function extractName(text = "") {
-  const raw = String(text).trim();
-  if (!raw) return "";
-
-  // strip punctuation around words (so "Tom." becomes "Tom")
-  const cleaned = raw.replace(/[^A-Za-z\s']/g, " ").replace(/\s+/g, " ").trim();
-
-  // “my name is ___”, “this is ___”, “i'm ___”
-  const m = cleaned.match(/\b(my name is|this is|i am|i'm|im)\s+([A-Za-z]{2,}(?:\s+[A-Za-z]{2,})?)\b/i);
-  if (m?.[2]) return m[2].trim();
-
-  // Single first name only (avoid grabbing sentences)
-  if (/^[A-Za-z]{2,}$/.test(cleaned) && cleaned.length <= 20) return cleaned;
-
+  const original = String(text).trim();
+  
+  // Pattern 1: "My name is ___", "This is ___", "I'm ___", "It's ___", "Call me ___"
+  const patterns = [
+    /(?:my name is|my name's|this is|i'm|im|i am|it'?s|call me|they call me)\s+([a-z]{2,}(?:\s+[a-z]+)?)\b/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const m = original.match(pattern);
+    if (m?.[1]) {
+      const extracted = m[1].trim();
+      // Make sure it's not a common false positive
+      if (!/^(the|that|this|there|here|what|when|where|how|why)$/i.test(extracted)) {
+        return extracted;
+      }
+    }
+  }
+  
+  // Pattern 2: Just a name by itself
+  // Remove all non-letter characters except spaces
+  const cleaned = original.replace(/[^a-zA-Z\s]/g, '').trim();
+  const words = cleaned.split(/\s+/).filter(w => w.length >= 2);
+  
+  // Single word that looks like a name (2-20 chars)
+  if (words.length === 1 && words[0].length >= 2 && words[0].length <= 20) {
+    const word = words[0];
+    // Exclude common words that might be misheard
+    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|can't|don't|won't)$/i.test(word)) {
+      return word;
+    }
+  }
+  
+  // Two words - take the first (likely first name)
+  if (words.length === 2 && words[0].length >= 2 && words[0].length <= 20) {
+    const word = words[0];
+    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|can't|don't|won't)$/i.test(word)) {
+      return word;
+    }
+  }
+  
   return "";
-
-  let nameAskCount = 0;
 }
 
 function extractCarYear(text = "") {
@@ -62,15 +88,15 @@ function extractCarMakeModel(text = "") {
     .replace(/[^\w\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-
+    
   // "1992 Ford Explorer" -> "Ford Explorer"
   const m1 = cleaned.match(/\b(19\d{2}|20[0-2]\d)\s+([A-Za-z]+)\s+([A-Za-z0-9]+)\b/);
   if (m1) return `${m1[2]} ${m1[3]}`.trim();
-
+  
   // "Ford Explorer"
   const m2 = cleaned.match(/\b([A-Za-z]+)\s+([A-Za-z0-9]+)\b/);
   if (m2) return `${m2[1]} ${m2[2]}`.trim();
-
+  
   return "";
 }
 
@@ -85,7 +111,7 @@ function speakZipDigits(zip = "") {
 // Issue routing (keyword-based; tune freely)
 function categorizeIssue(text = "") {
   const t = String(text).toLowerCase();
-
+  
   if (/(won't start|wont start|no start|clicking|starter|dead battery|jump start)/i.test(t)) return "no_start";
   if (/(overheat|overheating|temperature gauge|coolant|radiator|steam)/i.test(t)) return "overheating";
   if (/(brake|grind|squeal|squeak|pedal|rotor)/i.test(t)) return "brakes";
@@ -96,6 +122,7 @@ function categorizeIssue(text = "") {
   if (/(battery|alternator|charging|lights dim|electrical)/i.test(t)) return "electrical";
   if (/(flat tire|tire|puncture|blowout)/i.test(t)) return "tire";
   if (/(noise|rattle|clunk|knock)/i.test(t)) return "noise";
+  
   return "general";
 }
 
@@ -127,16 +154,16 @@ const FOLLOWUP_BY_CATEGORY = {
   ac: "Is it blowing warm air constantly or only at idle? Any unusual noises when the AC is on?",
   electrical: "Are you seeing dimming lights, a battery warning, or intermittent power issues? When did it start?",
   tire: "Is the tire flat right now, or losing air slowly?",
-  noise: "Is it more like a clunk/knock/rattle, and does it happen over bumps, turning, or accelerating?",
-  general: "What’s the make and model of the car?",
+  noise: "Is it more like a clunk, knock, or rattle, and does it happen over bumps, turning, or accelerating?",
+  general: "What's the make and model of the car?",
 };
 
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
 // 1) CONFIGURATION & SETUP
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
+
 const app = express();
 const PORT = process.env.PORT || 10000;
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -168,16 +195,19 @@ if (
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: false },
 });
+
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
 // 2) HEALTH CHECK
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
+
 app.get("/", (req, res) => res.send("MassMechanic Server is Awake 🤖"));
 
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
 // 3) TWILIO VOICE WEBHOOKS
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
+
 function getStreamUrl(req) {
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   const xfProto = req.headers["x-forwarded-proto"] || "https";
@@ -187,54 +217,51 @@ function getStreamUrl(req) {
 
 app.post("/voice", (req, res) => {
   res.type("text/xml");
-
   const streamUrl = getStreamUrl(req);
   const from = normalizePhone(req.body?.From || "");
   const caller = normalizePhone(req.body?.Caller || "");
   const callSid = req.body?.CallSid || "";
-
+  
   res.send(`
-    <Response>
-      <Connect>
-        <Stream url="${streamUrl}">
-          <Parameter name="from" value="${from}" />
-          <Parameter name="caller" value="${caller}" />
-          <Parameter name="callSid" value="${callSid}" />
-        </Stream>
-      </Connect>
-    </Response>
+<Response>
+  <Connect>
+    <Stream url="${streamUrl}">
+      <Parameter name="from" value="${from}" />
+      <Parameter name="caller" value="${caller}" />
+      <Parameter name="callSid" value="${callSid}" />
+    </Stream>
+  </Connect>
+</Response>
   `);
 });
 
 app.post("/transfer", (req, res) => {
   res.type("text/xml");
-
   if (!ADMIN_ESCALATION_PHONE) {
     return res.send(`
-      <Response>
-        <Say>Sorry, no operator is available right now.</Say>
-        <Hangup/>
-      </Response>
+<Response>
+  <Say>Sorry, no operator is available right now.</Say>
+  <Hangup/>
+</Response>
     `);
   }
-
   return res.send(`
-    <Response>
-      <Say>Connecting you now.</Say>
-      <Dial timeout="25" answerOnBridge="true">${ADMIN_ESCALATION_PHONE}</Dial>
-      <Say>Sorry — nobody answered. Please text us and we will follow up.</Say>
-      <Hangup/>
-    </Response>
+<Response>
+  <Say>Connecting you now.</Say>
+  <Dial timeout="25" answerOnBridge="true">${ADMIN_ESCALATION_PHONE}</Dial>
+  <Say>Sorry — nobody answered. Please text us and we will follow up.</Say>
+  <Hangup/>
+</Response>
   `);
 });
 
 // Your greeting (as requested)
-const VOICE_GREETING =
-  "Thanks for calling Mass Mechanic. Tell me what's going on with your car and I'll get you matched with a trusted local mechanic for free.";
+const VOICE_GREETING = "Thanks for calling Mass Mechanic. Tell me what's going on with your car and I'll get you matched with a trusted local mechanic for free.";
 
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
 // 4) SPEAK + LOGGING HELPERS
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
+
 function estimateSpeakMs(text = "") {
   // crude but good enough to avoid talking over the user:
   // ~15 chars/sec + min clamp
@@ -254,16 +281,16 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
       body: JSON.stringify({ text }),
     }
   );
-
+  
   if (!ttsResponse.ok) {
     const errText = await ttsResponse.text().catch(() => "");
     console.error("❌ TTS Failed:", ttsResponse.status, errText);
     return false;
   }
-
+  
   const audioBuffer = await ttsResponse.arrayBuffer();
   const base64Audio = Buffer.from(audioBuffer).toString("base64");
-
+  
   if (ws.readyState === WebSocket.OPEN && streamSid) {
     ws.send(JSON.stringify({ event: "media", streamSid, media: { payload: base64Audio } }));
     return true;
@@ -274,46 +301,28 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
 async function transferCallToHuman(callSid) {
   if (!ADMIN_ESCALATION_PHONE) return console.error("❌ Missing ADMIN_ESCALATION_PHONE");
   if (!callSid) return console.error("❌ Missing callSid — cannot transfer");
-
+  
   const baseUrl = PUBLIC_BASE_URL || "https://mass-mechanic-bot.onrender.com";
   const transferUrl = `${baseUrl}/transfer`;
-
+  
   await twilioClient.calls(callSid).update({ url: transferUrl, method: "POST" });
   console.log("📞 Call transfer initiated", { callSid, transferUrl });
 }
 
-// call_outcomes: create/update row (FIXED: caller_phone column name)
+// call_outcomes: create/update row
 async function upsertCallOutcome({ callSid, patch }) {
   if (!callSid) return;
-
   try {
-    // 1) Try update first
-    const { data: updated, error: updErr } = await supabase
+    const { error } = await supabase
       .from("call_outcomes")
-      .update({ ...patch })
-      .eq("call_sid", callSid)
-      .select("id")
-      .limit(1);
-
-    if (updErr) {
-      console.error("⚠️ call_outcomes update failed:", updErr.message);
-      // fall through to insert attempt
-    }
-
-    if (updated && updated.length > 0) return; // success
-
-    // 2) If nothing updated (row doesn't exist), insert
-    const { error: insErr } = await supabase
-      .from("call_outcomes")
-      .insert({ call_sid: callSid, ...patch });
-
-    if (insErr) console.error("⚠️ call_outcomes insert failed:", insErr.message);
+      .upsert({ call_sid: callSid, ...patch }, { onConflict: "call_sid" });
+    if (error) console.error("⚠️ call_outcomes upsert failed:", error.message);
   } catch (e) {
     console.error("⚠️ call_outcomes upsert exception:", e);
   }
 }
 
-// Create a lead in Supabase after confirmation (FIX: car_make_model non-null)
+// Create a lead in Supabase after confirmation
 async function createLeadFromCall({ callerPhone, state }) {
   try {
     const payload = {
@@ -326,16 +335,18 @@ async function createLeadFromCall({ callerPhone, state }) {
       phone: callerPhone || null,
       lead_source: "voice",
       status: "new",
-      lead_category: "repair", // optional; your send-lead function skips "maintenance"
+      lead_category: "repair",
       drivable: state.drivable || null,
       urgency_window: state.urgency_window || null,
     };
-
+    
     const { data, error } = await supabase.from("leads").insert(payload).select("id, lead_code").maybeSingle();
+    
     if (error) {
       console.error("❌ Lead insert failed:", error.message);
       return { ok: false, error: error.message };
     }
+    
     return { ok: true, lead: data };
   } catch (e) {
     console.error("❌ Lead insert exception:", e);
@@ -343,9 +354,10 @@ async function createLeadFromCall({ callerPhone, state }) {
   }
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
 // 5) WEBSOCKET SERVER FOR TWILIO MEDIA STREAMS
-// ───────────────────────────────────────────────────────────────────────────────
+//────────────────────────────────────────────────────────────────────────────────
+
 const server = app.listen(PORT, () => console.log(`✅ MassMechanic Running on ${PORT}`));
 const wss = new WebSocketServer({ noServer: true });
 
@@ -355,25 +367,21 @@ server.on("upgrade", (req, socket, head) => {
 
 wss.on("connection", (ws) => {
   console.log("🔗 Voice Connected");
-
+  
   let streamSid = null;
   let deepgramLive = null;
-
   let greeted = false;
   let transferred = false;
-
   let callerPhone = "unknown";
   let callSid = "";
-
-  let nameAskCount = 0;
-
+  
   // Turn-taking / anti-interrupt guardrails
   let isSpeaking = false;
   let speakUntilTs = 0;
   let processing = false;
   let pendingFinal = null;
   let lastFinalAt = 0;
-
+  
   const state = {
     name: "",
     zip: "",
@@ -384,13 +392,12 @@ wss.on("connection", (ws) => {
     confirmed: false,
     carMakeModel: "",
     carYear: "",
-    // optional: if you later add these questions
     drivable: "",
     urgency_window: "",
     leadCreated: false,
   };
-
-  // Keep GPT as “backup”, but prefer deterministic questions to reduce weirdness
+  
+  // Keep GPT as "backup"
   const messages = [
     {
       role: "system",
@@ -401,91 +408,93 @@ wss.on("connection", (ws) => {
         "If user says 'no' to confirmation, ask what to correct and then re-confirm.",
     },
   ];
-
+  
   const setupDeepgram = () => {
     deepgramLive = new WebSocket(
       "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&model=nova-2&smart_format=true",
       { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
     );
-
+    
     deepgramLive.on("open", () => console.log("🟢 Deepgram Listening"));
-
+    
     deepgramLive.on("message", async (data) => {
       if (transferred) return;
-
+      
       let received;
       try {
         received = JSON.parse(data);
       } catch {
         return;
       }
-
+      
       const transcript = received.channel?.alternatives?.[0]?.transcript;
       if (!transcript) return;
-
+      
       // Only act on final transcripts
       if (!received.is_final) return;
-
+      
       const text = transcript.trim();
       if (!text) return;
-
+      
       // Debounce / prevent rapid-fire finals causing talk-over
       const now = Date.now();
       lastFinalAt = now;
       pendingFinal = text;
-
+      
       // If currently speaking or processing, wait and process latest
       if (processing) return;
       if (isSpeaking && now < speakUntilTs) return;
-
+      
       await drainPendingFinal();
     });
-
+    
     deepgramLive.on("error", (err) => console.error("DG Error:", err));
   };
-
+  
   setupDeepgram();
-
+  
   function readyToConfirm() {
     // Require carMakeModel so lead insert doesn't violate NOT NULL
     return Boolean(state.issueText && state.zip && state.name && state.carMakeModel);
   }
-
+  
   async function say(text) {
     if (!ws || ws.readyState !== WebSocket.OPEN || !streamSid) return;
-
+    
+    console.log(`🤖 Bot: ${text}`);
+    
     // Mark speaking to reduce user-talk-over
     isSpeaking = true;
     const ms = estimateSpeakMs(text);
     speakUntilTs = Date.now() + ms;
-
+    
     const ok = await speakOverStream({ ws, streamSid, text, deepgramKey: DEEPGRAM_API_KEY });
+    
     if (!ok) {
       // if TTS fails, stop "speaking" state quickly
       speakUntilTs = Date.now() + 300;
     }
-
+    
     // Release speaking flag after estimated duration
     setTimeout(() => {
       isSpeaking = false;
     }, ms);
   }
-
+  
   async function drainPendingFinal() {
     if (!pendingFinal) return;
     processing = true;
-
+    
     try {
       // Grab the most recent final utterance and clear queue
       const text = pendingFinal;
       pendingFinal = null;
-
-      console.log(`🗣️ User: ${text}`);
-
+      
+      console.log(`🗣 User: ${text}`);
+      
       // Human escalation
       if (wantsHumanFromText(text)) {
         transferred = true;
-
         await upsertCallOutcome({
           callSid,
           patch: {
@@ -500,70 +509,75 @@ wss.on("connection", (ws) => {
             source: "voice",
           },
         });
-
         await say("Got it — connecting you to an operator now.");
         await transferCallToHuman(callSid);
-
-        try {
-          if (deepgramLive) deepgramLive.close();
-        } catch {}
-        try {
-          ws.close();
-        } catch {}
+        try { if (deepgramLive) deepgramLive.close(); } catch {}
+        try { ws.close(); } catch {}
         return;
       }
-
+      
       // ALWAYS attempt extraction (independent of other heuristics)
       if (!state.zip) {
         const z = extractZip(text);
-        if (z) state.zip = z;
+        if (z) {
+          state.zip = z;
+          console.log(`✅ Extracted ZIP: ${z}`);
+        }
       }
+      
       if (!state.name) {
-  nameAskCount += 1;
-  if (nameAskCount >= 2) {
-    await say("Sorry — I didn’t catch that. You can say just your first name, like 'Tom'.");
-  } else {
-    await say("And what’s your first name?");
-  }
-  return;
-}
+        const n = extractName(text);
+        if (n) {
+          state.name = n;
+          console.log(`✅ Extracted name: ${n}`);
+        }
+      }
+      
       if (!state.carYear) {
         const y = extractCarYear(text);
-        if (y) state.carYear = y;
+        if (y) {
+          state.carYear = y;
+          console.log(`✅ Extracted year: ${y}`);
+        }
       }
+      
       if (!state.carMakeModel) {
         const mm = extractCarMakeModel(text);
-        if (mm) state.carMakeModel = mm;
+        if (mm) {
+          state.carMakeModel = mm;
+          console.log(`✅ Extracted car: ${mm}`);
+        }
       }
-
+      
       // Capture issueText once (avoid overwriting with name/zip)
       if (!state.issueText) {
         const z = extractZip(text);
         const n = extractName(text);
         const mm = extractCarMakeModel(text);
-
+        
         // If utterance is not just zip/name/vehicle, treat as issue
         if (!z && !n && !mm && text.length > 6) {
           state.issueText = text;
           state.issueCategory = categorizeIssue(text);
+          console.log(`✅ Captured issue: ${text} (category: ${state.issueCategory})`);
         }
-
+        
         // If user says "my car is pulling to the right" etc, we still want to capture issue
         if (!state.issueText && text.length > 6 && !z && !n) {
-          // allow vehicle phrases to also be issue sometimes — but only if it contains problem keywords
           if (/(pull|brake|start|overheat|check engine|noise|shake|vibration|ac|battery|transmission|stall)/i.test(text)) {
             state.issueText = text;
             state.issueCategory = categorizeIssue(text);
+            console.log(`✅ Captured issue (fallback): ${text} (category: ${state.issueCategory})`);
           }
         }
       }
-
+      
       // If awaiting confirmation, handle yes/no deterministically
       if (state.awaitingConfirmation && !state.confirmed) {
         if (looksLikeYes(text)) {
           state.confirmed = true;
           state.awaitingConfirmation = false;
-
+          
           // Log call_outcomes (confirmed)
           await upsertCallOutcome({
             callSid,
@@ -579,7 +593,7 @@ wss.on("connection", (ws) => {
               source: "voice",
             },
           });
-
+          
           // Create lead (if not created already)
           if (!state.leadCreated) {
             const leadRes = await createLeadFromCall({ callerPhone, state });
@@ -588,68 +602,67 @@ wss.on("connection", (ws) => {
               console.log("✅ Lead created from voice:", leadRes.lead);
             }
           }
-
+          
           await say(
-            `Perfect — thanks, ${state.name}. We'll connect you with a trusted local mechanic near ZIP ${speakZipDigits(
-              state.zip
-            )}.`
+            `Perfect — thanks, ${state.name}. We'll connect you with a trusted local mechanic near ZIP ${speakZipDigits(state.zip)}.`
           );
           return;
         }
-
+        
         if (looksLikeNo(text)) {
           state.awaitingConfirmation = false;
           await say("No problem — what should I correct: your ZIP code, your name, the car, or the issue?");
           return;
         }
-        // unclear -> fall through
+        
+        // If unclear response during confirmation, try to extract corrections
+        // then fall through to normal flow
+        state.awaitingConfirmation = false;
       }
-
-      // Deterministic follow-ups to reduce “AI weirdness”
+      
+      // Deterministic follow-ups to reduce "AI weirdness"
       if (state.issueText && !state.askedFollowup) {
         state.askedFollowup = true;
         const followup = FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general;
         await say(followup);
         return;
       }
-
+      
       // Ask missing fields in a stable order (issue -> zip -> name -> car)
       if (!state.issueText) {
-        await say("Tell me what’s going on with your car.");
+        await say("Tell me what's going on with your car.");
         return;
       }
-
+      
       if (!state.zip) {
-        await say("What’s your 5-digit ZIP code?");
+        await say("What's your 5-digit ZIP code?");
         return;
       }
-
+      
       if (!state.name) {
-        await say("And what’s your first name?");
+        await say("And what's your first name?");
         return;
       }
-
+      
       if (!state.carMakeModel) {
-        await say("What’s the make and model of the car?");
+        await say("What's the make and model of the car?");
         return;
       }
-
+      
       // Confirmation (pronounce ZIP with leading zeros)
       if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
         state.awaitingConfirmation = true;
-
         const zipSpoken = speakZipDigits(state.zip);
         const carSpoken = `${state.carYear ? state.carYear + " " : ""}${state.carMakeModel}`.trim();
-
         await say(
           `To confirm: you're in ZIP ${zipSpoken}, the car is a ${carSpoken}, and the issue is "${state.issueText}". Is that right?`
         );
         return;
       }
-
+      
       // Backup GPT only if we somehow get here (should be rare)
       messages.push({ role: "user", content: text });
-
+      
       const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
@@ -668,29 +681,28 @@ wss.on("connection", (ws) => {
           max_tokens: 90,
         }),
       });
-
+      
       const gptJson = await gpt.json();
       const aiText = gptJson?.choices?.[0]?.message?.content?.trim();
-
+      
       if (!aiText) {
-        await say("I’m having a quick technical issue. Please text us your ZIP and what’s going on, and we’ll follow up right away.");
+        await say("I'm having a quick technical issue. Please text us your ZIP and what's going on, and we'll follow up right away.");
         return;
       }
-
+      
       messages.push({ role: "assistant", content: aiText });
-      console.log(`🤖 AI: ${aiText}`);
       await say(aiText);
+      
     } catch (e) {
       console.error("AI/TTS Error:", e);
       try {
-        await say("Sorry — I had a quick technical glitch. Please text us your ZIP and car issue, and we’ll follow up right away.");
+        await say("Sorry — I had a quick technical glitch. Please text us your ZIP and car issue, and we'll follow up right away.");
       } catch {}
     } finally {
       processing = false;
-
+      
       // If another final came in while processing, handle it now (latest wins)
       if (pendingFinal && !transferred) {
-        // small delay to avoid instant overlap with TTS
         setTimeout(() => {
           if (!processing && !(isSpeaking && Date.now() < speakUntilTs)) {
             drainPendingFinal();
@@ -699,7 +711,7 @@ wss.on("connection", (ws) => {
       }
     }
   }
-
+  
   ws.on("message", async (msg) => {
     let data;
     try {
@@ -707,19 +719,18 @@ wss.on("connection", (ws) => {
     } catch {
       return;
     }
-
+    
     if (data.event === "start") {
       streamSid = data.start.streamSid;
       const params = data.start?.customParameters || {};
-
       const pFrom = normalizePhone(params.from || "");
       const pCaller = normalizePhone(params.caller || "");
       callerPhone = pFrom || pCaller || "unknown";
       callSid = params.callSid || data.start.callSid || callSid;
-
+      
       console.log("☎️ Stream start", { streamSid, callSid, callerPhone });
-
-      // Create/initialize call_outcomes row (FIX: caller_phone column)
+      
+      // Create/initialize call_outcomes row
       await upsertCallOutcome({
         callSid,
         patch: {
@@ -730,19 +741,19 @@ wss.on("connection", (ws) => {
           notes: null,
         },
       });
-
+      
       if (!greeted) {
         greeted = true;
         await say(VOICE_GREETING);
       }
       return;
     }
-
+    
     if (data.event === "media" && deepgramLive?.readyState === WebSocket.OPEN) {
       deepgramLive.send(Buffer.from(data.media.payload, "base64"));
       return;
     }
-
+    
     if (data.event === "stop") {
       // Finalize call outcome if still in progress
       await upsertCallOutcome({
@@ -759,19 +770,15 @@ wss.on("connection", (ws) => {
           source: "voice",
         },
       });
-
-      try {
-        if (deepgramLive) deepgramLive.close();
-      } catch {}
+      
+      try { if (deepgramLive) deepgramLive.close(); } catch {}
       return;
     }
   });
-
+  
   ws.on("close", async () => {
-    try {
-      if (deepgramLive) deepgramLive.close();
-    } catch {}
-
+    try { if (deepgramLive) deepgramLive.close(); } catch {}
+    
     // Best-effort finalize if socket closes unexpectedly
     await upsertCallOutcome({
       callSid,
