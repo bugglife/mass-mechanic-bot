@@ -357,6 +357,7 @@ wss.on("connection", (ws) => {
     zip: "",
     issueText: "",
     issueCategory: "general",
+    carMakeModel: "",   // New
     askedFollowup: false,
     awaitingConfirmation: false,
     confirmed: false,
