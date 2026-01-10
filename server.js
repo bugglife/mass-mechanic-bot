@@ -144,7 +144,7 @@ app.get("/", (_req, res) => res.send("MassMechanic Server is Awake 🤖"));
 // 2) TWILIO VOICE WEBHOOKS
 // ───────────────────────────────────────────────────────────────
 const VOICE_GREETING =
-  "Thanks for calling MassMechanic. Tell me what’s going on with your car, and I’ll get you matched with a trusted local mechanic for free;
+  "Thanks for calling MassMechanic. Tell me what’s going on with your car, and I’ll get you matched with a trusted local mechanic for free.";
 
 function getStreamUrl(req) {
   const host = req.headers["x-forwarded-host"] || req.headers.host;
