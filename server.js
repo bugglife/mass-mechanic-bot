@@ -1,5 +1,3 @@
-Copy code
-Js
 // server.js
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
