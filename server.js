@@ -54,6 +54,14 @@ function extractName(text = "") {
   return "";
 }
 
+function extractCarMakeModel(text = "") {
+  // crude but effective: "1992 Ford Explorer", "Toyota Camry", etc.
+  const m = text.match(
+    /\b(19\d{2}|20\d{2})?\s*(ford|toyota|honda|chevy|chevrolet|nissan|bmw|audi|jeep|hyundai|kia|subaru|mazda|volkswagen|vw)\s+[a-z0-9]+/i
+  );
+  return m ? m[0].trim() : "";
+}
+
 // Issue routing (keyword-based)
 function categorizeIssue(text = "") {
   const t = text.toLowerCase();
