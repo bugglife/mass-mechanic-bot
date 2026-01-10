@@ -287,32 +287,59 @@ function estimateSpeakMs(text = "") {
   return ms;
 }
 
-async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
-  const ttsResponse = await fetch(
-    "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Token ${deepgramKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ text }),
+// Enhanced with retry logic and better error handling
+async function speakOverStream({ ws, streamSid, text, deepgramKey, retries = 2 }) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      
+      const ttsResponse = await fetch(
+        "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Token ${deepgramKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text }),
+          signal: controller.signal,
+        }
+      );
+      
+      clearTimeout(timeout);
+      
+      if (!ttsResponse.ok) {
+        const errText = await ttsResponse.text().catch(() => "");
+        console.error(`❌ TTS Failed (attempt ${attempt + 1}/${retries + 1}):`, ttsResponse.status, errText);
+        
+        if (attempt < retries) {
+          await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms before retry
+          continue;
+        }
+        return false;
+      }
+      
+      const audioBuffer = await ttsResponse.arrayBuffer();
+      const base64Audio = Buffer.from(audioBuffer).toString("base64");
+      
+      if (ws.readyState === WebSocket.OPEN && streamSid) {
+        ws.send(JSON.stringify({ event: "media", streamSid, media: { payload: base64Audio } }));
+        return true;
+      }
+      return false;
+      
+    } catch (error) {
+      console.error(`❌ TTS Error (attempt ${attempt + 1}/${retries + 1}):`, error.message);
+      
+      if (attempt < retries) {
+        await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms before retry
+        continue;
+      }
+      return false;
     }
-  );
-  
-  if (!ttsResponse.ok) {
-    const errText = await ttsResponse.text().catch(() => "");
-    console.error("❌ TTS Failed:", ttsResponse.status, errText);
-    return false;
   }
   
-  const audioBuffer = await ttsResponse.arrayBuffer();
-  const base64Audio = Buffer.from(audioBuffer).toString("base64");
-  
-  if (ws.readyState === WebSocket.OPEN && streamSid) {
-    ws.send(JSON.stringify({ event: "media", streamSid, media: { payload: base64Audio } }));
-    return true;
-  }
   return false;
 }
 
@@ -524,6 +551,7 @@ wss.on("connection", (ws) => {
     if (!ok) {
       // if TTS fails, stop "speaking" state quickly
       speakUntilTs = Date.now() + 500;
+      console.error("❌ TTS completely failed after retries");
     }
     
     // Release speaking flag after estimated duration + buffer
@@ -757,7 +785,7 @@ wss.on("connection", (ws) => {
       await say(aiText);
       
     } catch (e) {
-      console.error("AI/TTS Error:", e);
+      console.error("❌ Processing Error:", e);
       try {
         await say("Sorry — I had a quick technical glitch. Please text us your ZIP and car issue, and we'll follow up right away.");
       } catch {}
