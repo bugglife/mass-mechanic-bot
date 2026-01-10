@@ -278,14 +278,29 @@ async function transferCallToHuman(callSid) {
 // call_outcomes: create/update row (FIXED: caller_phone column name)
 async function upsertCallOutcome({ callSid, patch }) {
   if (!callSid) return;
-  try {
-    // If you have a UNIQUE index on call_sid, this will behave nicely.
-    // If not, it will insert duplicates; consider adding UNIQUE(call_sid).
-    const { error } = await supabase
-      .from("call_outcomes")
-      .upsert({ call_sid: callSid, ...patch }, { onConflict: "call_sid" });
 
-    if (error) console.error("⚠️ call_outcomes upsert failed:", error.message);
+  try {
+    // 1) Try update first
+    const { data: updated, error: updErr } = await supabase
+      .from("call_outcomes")
+      .update({ ...patch })
+      .eq("call_sid", callSid)
+      .select("id")
+      .limit(1);
+
+    if (updErr) {
+      console.error("⚠️ call_outcomes update failed:", updErr.message);
+      // fall through to insert attempt
+    }
+
+    if (updated && updated.length > 0) return; // success
+
+    // 2) If nothing updated (row doesn't exist), insert
+    const { error: insErr } = await supabase
+      .from("call_outcomes")
+      .insert({ call_sid: callSid, ...patch });
+
+    if (insErr) console.error("⚠️ call_outcomes insert failed:", insErr.message);
   } catch (e) {
     console.error("⚠️ call_outcomes upsert exception:", e);
   }
