@@ -366,7 +366,6 @@ async function createLeadAndDispatch({
 
   return { ok: true, lead };
 }
-}
 
 // ────────────────────────────────────────────────────────────
 // 5. WEBSOCKET SERVER FOR TWILIO MEDIA STREAMS
