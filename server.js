@@ -282,6 +282,16 @@ app.post("/transfer", (req, res) => {
   `);
 });
 
+// NEW: Endpoint to hangup the call
+app.post("/hangup", (req, res) => {
+  res.type("text/xml");
+  res.send(`
+<Response>
+  <Hangup/>
+</Response>
+  `);
+});
+
 // Updated greeting as requested
 const VOICE_GREETING = "Thanks for calling Mass Mechanic — we connect you with trusted local mechanics for fast, free repair quotes. Tell me what's wrong with your car or ask me a quick question.";
 
@@ -363,6 +373,21 @@ async function transferCallToHuman(callSid) {
   console.log("📞 Call transfer initiated", { callSid, transferUrl });
 }
 
+// NEW: Function to hangup the call
+async function hangupCall(callSid) {
+  if (!callSid) return console.error("❌ Missing callSid — cannot hangup");
+  
+  const baseUrl = PUBLIC_BASE_URL || "https://mass-mechanic-bot.onrender.com";
+  const hangupUrl = `${baseUrl}/hangup`;
+  
+  try {
+    await twilioClient.calls(callSid).update({ url: hangupUrl, method: "POST" });
+    console.log("📞 Call hangup initiated", { callSid });
+  } catch (error) {
+    console.error("❌ Hangup failed:", error);
+  }
+}
+
 // call_outcomes: create/update row - FIXED to handle missing UNIQUE constraint
 async function upsertCallOutcome({ callSid, patch }) {
   if (!callSid) return;
@@ -393,7 +418,7 @@ async function upsertCallOutcome({ callSid, patch }) {
   }
 }
 
-// Create a lead in Supabase after confirmation - FIXED email field requirement
+// Create a lead in Supabase after confirmation - FIXED to use empty string for email
 async function createLeadFromCall({ callerPhone, state }) {
   try {
     const payload = {
@@ -404,7 +429,7 @@ async function createLeadFromCall({ callerPhone, state }) {
       description: state.issueText || "",
       name: state.name || null,
       phone: callerPhone || null,
-      email: null, // Voice calls don't collect email - set to null explicitly
+      email: "", // CHANGED: Use empty string instead of null for NOT NULL constraint
       lead_source: "voice",
       status: "new",
       lead_category: "repair",
@@ -463,8 +488,8 @@ wss.on("connection", (ws) => {
     askedFollowup: false,
     awaitingFollowupResponse: false,
     awaitingConfirmation: false,
-    awaitingCorrectionChoice: false, // NEW: waiting for user to say what to correct
-    correctingField: null, // NEW: which field we're correcting (zip, name, car, issue)
+    awaitingCorrectionChoice: false, // waiting for user to say what to correct
+    correctingField: null, // which field we're correcting (zip, name, car, issue)
     confirmed: false,
     carMakeModel: "",
     carYear: "",
@@ -757,12 +782,21 @@ wss.on("connection", (ws) => {
           await say(
             `Perfect — thanks, ${state.name}. We'll connect you with a trusted local mechanic near ZIP ${speakZipDigits(state.zip)}.`
           );
+          
+          // NEW: Hangup after 2 seconds to let the message finish
+          setTimeout(async () => {
+            console.log("📞 Initiating call hangup after confirmation");
+            await hangupCall(callSid);
+            try { if (deepgramLive) deepgramLive.close(); } catch {}
+            try { ws.close(); } catch {}
+          }, 2000);
+          
           return;
         }
         
         if (looksLikeNo(text)) {
           state.awaitingConfirmation = false;
-          state.awaitingCorrectionChoice = true; // NEW: Set flag to wait for correction choice
+          state.awaitingCorrectionChoice = true; // Set flag to wait for correction choice
           await say("No problem — what should I correct: your ZIP code, your name, the car, or the issue?");
           return;
         }
