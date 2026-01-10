@@ -365,6 +365,8 @@ wss.on("connection", (ws) => {
   let callerPhone = "unknown";
   let callSid = "";
 
+  let nameAskCount = 0;
+
   // Turn-taking / anti-interrupt guardrails
   let isSpeaking = false;
   let speakUntilTs = 0;
