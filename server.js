@@ -427,6 +427,10 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    if (!state.carMakeModel) {
+      const c = extractCarMakeModel(text);
+      if (c) state.carMakeModel = c;
+}
     // Extract + persist state (never clear fields once set)
     if (!state.name) {
       const n = extractName(text);
@@ -516,6 +520,14 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    function nextDeterministicQuestion() {
+      if (!state.issueText) return "What problem are you having with the car?";
+      if (!state.zip) return "What’s your 5 digit ZIP code?";
+      if (!state.carMakeModel) return "What’s the car’s make and model?";
+      if (!state.name) return "And what’s your first name?";
+      return null;
+    }
+    
     // Fallback: if somehow we’re here, ask the next deterministic question again
     const q2 = nextDeterministicQuestion();
     if (q2) await safeSpeak(q2);
