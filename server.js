@@ -1,29 +1,21 @@
+Copy code
+Js
+// server.js
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
 import twilio from "twilio";
 import WebSocket, { WebSocketServer } from "ws";
 import fetch from "node-fetch";
 
-// ───────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────
 // 0) HELPERS
-// ───────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────
 function normalizePhone(phone = "") {
   const digits = String(phone).replace(/\D/g, "");
   if (!digits) return "";
   if (digits.length === 10) return `1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return digits;
   return digits;
-}
-
-function normalizeZip(zip = "") {
-  const m = String(zip).match(/\b(\d{5})(?:-\d{4})?\b/);
-  return m ? m[1] : "";
-}
-
-// Speak ZIP as digits: "02321" => "0 2 3 2 1"
-function zipToSpokenDigits(zip5 = "") {
-  const z = normalizeZip(zip5);
-  if (!z) return "";
-  return z.split("").join(" ");
 }
 
 function wantsHumanFromText(text = "") {
@@ -39,32 +31,55 @@ function looksLikeNo(text = "") {
 }
 
 function extractZip(text = "") {
-  return normalizeZip(text);
+  const m = String(text).match(/\b(\d{5})(?:-\d{4})?\b/);
+  return m ? m[1] : "";
 }
 
 function extractName(text = "") {
-  // "my name is Bob", "this is Bob"
-  const m = text.match(/\b(my name is|this is|i'm|im)\s+([A-Za-z]+)\b/i);
+  const t = String(text).trim();
+
+  // “My name is ___”, “This is ___”, “I’m ___”
+  const m = t.match(/\b(my name is|this is|i'm|im)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)\b/i);
   if (m?.[2]) return m[2].trim();
 
-  // Single first name like "Bob."
-  const t = text.trim().replace(/[^\w\s'-]/g, "");
-  if (/^[A-Za-z]{2,20}$/.test(t)) return t;
+  // single first name (avoid grabbing random phrases)
+  if (/^[A-Za-z]{2,}$/.test(t) && t.length <= 20) return t;
+  return "";
+}
+
+function extractCarYear(text = "") {
+  const m = String(text).match(/\b(19\d{2}|20[0-2]\d)\b/);
+  return m ? m[1] : "";
+}
+
+function extractCarMakeModel(text = "") {
+  const cleaned = String(text)
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // "1992 Ford Explorer" -> "Ford Explorer"
+  const m1 = cleaned.match(/\b(19\d{2}|20[0-2]\d)\s+([A-Za-z]+)\s+([A-Za-z0-9]+)\b/);
+  if (m1) return `${m1[2]} ${m1[3]}`.trim();
+
+  // "Ford Explorer"
+  const m2 = cleaned.match(/\b([A-Za-z]+)\s+([A-Za-z0-9]+)\b/);
+  if (m2) return `${m2[1]} ${m2[2]}`.trim();
 
   return "";
 }
 
-function extractCarMakeModel(text = "") {
-  // crude but effective: "1992 Ford Explorer", "Toyota Camry", etc.
-  const m = text.match(
-    /\b(19\d{2}|20\d{2})?\s*(ford|toyota|honda|chevy|chevrolet|nissan|bmw|audi|jeep|hyundai|kia|subaru|mazda|volkswagen|vw)\s+[a-z0-9]+/i
-  );
-  return m ? m[0].trim() : "";
+function speakZipDigits(zip = "") {
+  // 02321 -> "zero two three two one"
+  return String(zip)
+    .split("")
+    .map((d) => (d === "0" ? "zero" : d))
+    .join(" ");
 }
 
-// Issue routing (keyword-based)
+// Issue routing (keyword-based; tune freely)
 function categorizeIssue(text = "") {
-  const t = text.toLowerCase();
+  const t = String(text).toLowerCase();
 
   if (/(won't start|wont start|no start|clicking|starter|dead battery|jump start)/i.test(t)) return "no_start";
   if (/(overheat|overheating|temperature gauge|coolant|radiator|steam)/i.test(t)) return "overheating";
@@ -74,45 +89,46 @@ function categorizeIssue(text = "") {
   if (/(transmission|slipping|hard shift|won't shift|gear)/i.test(t)) return "transmission";
   if (/(ac|a\/c|air conditioner|no cold|blowing warm)/i.test(t)) return "ac";
   if (/(battery|alternator|charging|lights dim|electrical)/i.test(t)) return "electrical";
-  if (/(noise|rattle|clunk|knock)/i.test(t)) return "noise";
   if (/(flat tire|tire|puncture|blowout)/i.test(t)) return "tire";
-
+  if (/(noise|rattle|clunk|knock)/i.test(t)) return "noise";
   return "general";
 }
 
+// Map voice category -> leads.service_type (so you have something consistent)
+function serviceTypeFromCategory(cat = "general") {
+  const map = {
+    brakes: "brake-repair",
+    pulling_alignment: "alignment-steering",
+    no_start: "no-start-battery-starter",
+    overheating: "cooling-system",
+    check_engine: "check-engine-diagnostics",
+    transmission: "transmission",
+    ac: "ac-repair",
+    electrical: "electrical",
+    tire: "tire-service",
+    noise: "noise-diagnosis",
+    general: "general-repair",
+  };
+  return map[cat] || "general-repair";
+}
+
 const FOLLOWUP_BY_CATEGORY = {
-  brakes: "Got it. Are you hearing squeaking or grinding, and does it happen only when braking?",
-  pulling_alignment: "When it pulls, does the steering wheel shake or feel off-center?",
-  no_start: "When you turn the key, do you hear a click, a crank, or nothing at all?",
-  overheating: "Have you seen steam or coolant leaks, and how long into driving does it happen?",
-  check_engine: "Is it running rough or losing power, and is the light flashing or solid?",
-  transmission: "Is it slipping, shifting hard, or refusing to go into gear?",
-  ac: "Is it blowing warm all the time or only at idle?",
-  electrical: "Are the lights dimming or is there a battery warning light?",
-  noise: "Is it more of a clunk/knock/rattle, and does it happen over bumps or while turning?",
-  tire: "Is it flat right now, or losing air slowly?",
-  general: "Got it. What’s the main symptom you’re noticing?"
+  brakes: "Are you hearing squeaking or grinding, and does it happen only when braking or all the time?",
+  pulling_alignment: "Does it pull mostly at higher speeds, and does the steering wheel shake or feel off-center?",
+  no_start: "When you turn the key, do you hear a click, a crank, or nothing at all? And are the dash lights on?",
+  overheating: "Has the temp gauge gone into the red, or have you seen steam or coolant leaks? How long into driving does it happen?",
+  check_engine: "Is the car running rough or losing power? And is the light flashing or solid?",
+  transmission: "Is it slipping, shifting hard, or refusing to go into gear? Any warning lights?",
+  ac: "Is it blowing warm air constantly or only at idle? Any unusual noises when the AC is on?",
+  electrical: "Are you seeing dimming lights, a battery warning, or intermittent power issues? When did it start?",
+  tire: "Is the tire flat right now, or losing air slowly?",
+  noise: "Is it more like a clunk/knock/rattle, and does it happen over bumps, turning, or accelerating?",
+  general: "What’s the make and model of the car?",
 };
 
-// Optional: map issue_category -> service_type used by your leads table.
-// Keep these matching what your form/edge expects.
-const SERVICE_TYPE_BY_CATEGORY = {
-  brakes: "brake-repair",
-  pulling_alignment: "steering-suspension",
-  no_start: "battery-starter-alternator",
-  overheating: "cooling-system",
-  check_engine: "check-engine-light",
-  transmission: "transmission-repair",
-  ac: "ac-repair",
-  electrical: "electrical-diagnostics",
-  noise: "diagnostic",
-  tire: "tire-service",
-  general: "diagnostic"
-};
-
-// ───────────────────────────────────────────────────────────────
-// 1) APP SETUP
-// ───────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────
+// 1) CONFIGURATION & SETUP
+// ───────────────────────────────────────────────────────────────────────────────
 const app = express();
 const PORT = process.env.PORT || 10000;
 
@@ -124,28 +140,39 @@ const {
   DEEPGRAM_API_KEY,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
+  TWILIO_PHONE_NUMBER,
   SUPABASE_URL,
   SUPABASE_KEY,
   PUBLIC_BASE_URL,
-  ADMIN_ESCALATION_PHONE
+  ADMIN_ESCALATION_PHONE,
 } = process.env;
 
-if (!DEEPGRAM_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("❌ CRITICAL: Missing env vars");
+if (
+  !OPENAI_API_KEY ||
+  !DEEPGRAM_API_KEY ||
+  !TWILIO_ACCOUNT_SID ||
+  !TWILIO_AUTH_TOKEN ||
+  !TWILIO_PHONE_NUMBER ||
+  !SUPABASE_URL ||
+  !SUPABASE_KEY
+) {
+  console.error("❌ CRITICAL: Missing required env vars.");
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: false },
+});
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-app.get("/", (_req, res) => res.send("MassMechanic Server is Awake 🤖"));
+// ───────────────────────────────────────────────────────────────────────────────
+// 2) HEALTH CHECK
+// ───────────────────────────────────────────────────────────────────────────────
+app.get("/", (req, res) => res.send("MassMechanic Server is Awake 🤖"));
 
-// ───────────────────────────────────────────────────────────────
-// 2) TWILIO VOICE WEBHOOKS
-// ───────────────────────────────────────────────────────────────
-const VOICE_GREETING =
-  "Thanks for calling MassMechanic. Tell me what’s going on with your car, and I’ll get you matched with a trusted local mechanic for free.";
-
+// ───────────────────────────────────────────────────────────────────────────────
+// 3) TWILIO VOICE WEBHOOKS
+// ───────────────────────────────────────────────────────────────────────────────
 function getStreamUrl(req) {
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   const xfProto = req.headers["x-forwarded-proto"] || "https";
@@ -196,9 +223,20 @@ app.post("/transfer", (req, res) => {
   `);
 });
 
-// ───────────────────────────────────────────────────────────────
-// 3) DEEPGRAM TTS
-// ───────────────────────────────────────────────────────────────
+// Your greeting (as requested)
+const VOICE_GREETING =
+  "Thanks for calling Mass Mechanic. Tell me what's going on with your car and I'll get you matched with a trusted local mechanic for free.";
+
+// ───────────────────────────────────────────────────────────────────────────────
+// 4) SPEAK + LOGGING HELPERS
+// ───────────────────────────────────────────────────────────────────────────────
+function estimateSpeakMs(text = "") {
+  // crude but good enough to avoid talking over the user:
+  // ~15 chars/sec + min clamp
+  const ms = Math.max(900, Math.min(9000, Math.ceil(String(text).length / 15) * 1000));
+  return ms;
+}
+
 async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
   const ttsResponse = await fetch(
     "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none",
@@ -206,16 +244,16 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
       method: "POST",
       headers: {
         Authorization: `Token ${deepgramKey}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text }),
     }
   );
 
   if (!ttsResponse.ok) {
     const errText = await ttsResponse.text().catch(() => "");
     console.error("❌ TTS Failed:", ttsResponse.status, errText);
-    return;
+    return false;
   }
 
   const audioBuffer = await ttsResponse.arrayBuffer();
@@ -223,11 +261,13 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey }) {
 
   if (ws.readyState === WebSocket.OPEN && streamSid) {
     ws.send(JSON.stringify({ event: "media", streamSid, media: { payload: base64Audio } }));
+    return true;
   }
+  return false;
 }
 
 async function transferCallToHuman(callSid) {
-  if (!ADMIN_ESCALATION_PHONE) return console.error("❌ Missing ADMIN_ESCALATION_PHONE env var");
+  if (!ADMIN_ESCALATION_PHONE) return console.error("❌ Missing ADMIN_ESCALATION_PHONE");
   if (!callSid) return console.error("❌ Missing callSid — cannot transfer");
 
   const baseUrl = PUBLIC_BASE_URL || "https://mass-mechanic-bot.onrender.com";
@@ -237,99 +277,55 @@ async function transferCallToHuman(callSid) {
   console.log("📞 Call transfer initiated", { callSid, transferUrl });
 }
 
-// ───────────────────────────────────────────────────────────────
-// 4) CALL OUTCOME + LEAD CREATION
-// ───────────────────────────────────────────────────────────────
-async function insertCallOutcome({
-  callSid,
-  callerPhone,
-  name,
-  zip,
-  issueText,
-  issueCategory,
-  confirmed,
-  outcome,
-  notes
-}) {
+// call_outcomes: create/update row (FIXED: caller_phone column name)
+async function upsertCallOutcome({ callSid, patch }) {
+  if (!callSid) return;
+  try {
+    // If you have a UNIQUE index on call_sid, this will behave nicely.
+    // If not, it will insert duplicates; consider adding UNIQUE(call_sid).
+    const { error } = await supabase
+      .from("call_outcomes")
+      .upsert({ call_sid: callSid, ...patch }, { onConflict: "call_sid" });
+
+    if (error) console.error("⚠️ call_outcomes upsert failed:", error.message);
+  } catch (e) {
+    console.error("⚠️ call_outcomes upsert exception:", e);
+  }
+}
+
+// Create a lead in Supabase after confirmation (FIX: car_make_model non-null)
+async function createLeadFromCall({ callerPhone, state }) {
   try {
     const payload = {
-      call_sid: callSid || null,
-      caller_phone: callerPhone || null, // ✅ correct column name
-      name: name || null,
-      zip_code: zip || null,
-      issue_text: issueText || null,
-      issue_category: issueCategory || null,
-      confirmed: !!confirmed,
-      outcome: outcome || null,
-      notes: notes || null,
-      source: "voice"
+      service_type: serviceTypeFromCategory(state.issueCategory),
+      zip_code: state.zip,
+      car_make_model: state.carMakeModel || "Unknown",
+      car_year: state.carYear || null,
+      description: state.issueText || "",
+      name: state.name || null,
+      phone: callerPhone || null,
+      lead_source: "voice",
+      status: "new",
+      lead_category: "repair", // optional; your send-lead function skips "maintenance"
+      drivable: state.drivable || null,
+      urgency_window: state.urgency_window || null,
     };
 
-    const { error } = await supabase.from("call_outcomes").insert(payload);
-    if (error) console.error("⚠️ call_outcomes insert failed:", error.message);
+    const { data, error } = await supabase.from("leads").insert(payload).select("id, lead_code").maybeSingle();
+    if (error) {
+      console.error("❌ Lead insert failed:", error.message);
+      return { ok: false, error: error.message };
+    }
+    return { ok: true, lead: data };
   } catch (e) {
-    console.error("⚠️ call_outcomes insert exception:", e?.message || e);
+    console.error("❌ Lead insert exception:", e);
+    return { ok: false, error: e?.message || "unknown" };
   }
 }
 
-async function createLeadAndDispatch({ callerPhone, name, zip, issueText, issueCategory, carMakeModel }) {
-  const zip5 = normalizeZip(zip);
-  const phoneDigits = String(callerPhone || "").replace(/\D/g, "");
-
-  const serviceType =
-    SERVICE_TYPE_BY_CATEGORY[issueCategory] ||
-    SERVICE_TYPE_BY_CATEGORY.general;
-
-  const leadPayload = {
-    service_type: serviceType,
-    zip_code: zip5,
-    description: issueText,
-    name: name || null,
-    phone: phoneDigits || null,
-    email: null,
-
-    car_make_model: carMakeModel, // ✅ REQUIRED FIELD
-    
-    lead_source: "voice",
-    lead_category: "repair",
-    status: "new",
-
-    lead_tier: "standard",
-    lead_score_total: 0,
-
-    drivable: null,
-    urgency_window: null
-  };
-
-  const { data: lead, error } = await supabase
-    .from("leads")
-    .insert(leadPayload)
-    .select("id, lead_code")
-    .maybeSingle();
-
-  if (error || !lead?.id) {
-    console.error("❌ Lead insert failed:", error?.message || error);
-    return { ok: false, error: error?.message || "lead_insert_failed" };
-  }
-
-  console.log("✅ Lead created:", { id: lead.id, lead_code: lead.lead_code, zip: zip5, service_type: serviceType });
-
-  // Dispatch to mechanics (your edge function expects lead_id)
-  try {
-    const { error: invokeErr } = await supabase.functions.invoke("send-lead-to-mechanics", {
-      body: { lead_id: lead.id }
-    });
-    if (invokeErr) console.error("⚠️ send-lead-to-mechanics failed:", invokeErr.message);
-  } catch (e) {
-    console.error("⚠️ send-lead-to-mechanics exception:", e?.message || e);
-  }
-
-  return { ok: true, lead };
-}
-
-// ───────────────────────────────────────────────────────────────
-// 5) SERVER + WS UPGRADE
-// ───────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────
+// 5) WEBSOCKET SERVER FOR TWILIO MEDIA STREAMS
+// ───────────────────────────────────────────────────────────────────────────────
 const server = app.listen(PORT, () => console.log(`✅ MassMechanic Running on ${PORT}`));
 const wss = new WebSocketServer({ noServer: true });
 
@@ -337,59 +333,52 @@ server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
 });
 
-// ───────────────────────────────────────────────────────────────
-// 6) VOICE SESSION (STATE MACHINE CONTROLS FLOW)
-// ───────────────────────────────────────────────────────────────
 wss.on("connection", (ws) => {
   console.log("🔗 Voice Connected");
 
   let streamSid = null;
   let deepgramLive = null;
+
   let greeted = false;
+  let transferred = false;
 
   let callerPhone = "unknown";
   let callSid = "";
-  let transferred = false;
 
-  // Simple anti-overlap: if we just spoke, wait briefly before speaking again.
-  let ttsBusy = false;
-  async function safeSpeak(text) {
-    if (!text) return;
-    if (ttsBusy) return; // drop if already speaking (prevents stepping-on)
-    ttsBusy = true;
-    await speakOverStream({ ws, streamSid, text, deepgramKey: DEEPGRAM_API_KEY });
-    // short cooldown
-    setTimeout(() => (ttsBusy = false), 900);
-  }
+  // Turn-taking / anti-interrupt guardrails
+  let isSpeaking = false;
+  let speakUntilTs = 0;
+  let processing = false;
+  let pendingFinal = null;
+  let lastFinalAt = 0;
 
   const state = {
     name: "",
     zip: "",
     issueText: "",
     issueCategory: "general",
-    carMakeModel: "",   // New
     askedFollowup: false,
     awaitingConfirmation: false,
     confirmed: false,
-    leadCreated: false
+    carMakeModel: "",
+    carYear: "",
+    // optional: if you later add these questions
+    drivable: "",
+    urgency_window: "",
+    leadCreated: false,
   };
 
-  function readyToConfirm() {
-    return Boolean(state.issueText && state.zip && state.name);
-  }
-
-  function nextDeterministicQuestion() {
-    // IMPORTANT: prevents loops
-    if (!state.issueText) return "What problem are you having with the car?";
-    if (!state.zip) return "What’s your 5 digit ZIP code?";
-    if (!state.name) return "And what’s your first name?";
-    return null;
-  }
-
-  function buildConfirmLine() {
-    const zipSpoken = zipToSpokenDigits(state.zip);
-    return `To confirm: ZIP ${zipSpoken}, and the issue is: ${state.issueText}. Is that correct?`;
-  }
+  // Keep GPT as “backup”, but prefer deterministic questions to reduce weirdness
+  const messages = [
+    {
+      role: "system",
+      content:
+        "You are the MassMechanic phone agent. Keep replies SHORT (1 sentence). Ask ONE question at a time. " +
+        "Goal: collect (1) what's wrong, (2) ZIP code, (3) first name, (4) car make/model (year optional). " +
+        "Do NOT ask for last name. Do NOT end the call until you confirm the details. " +
+        "If user says 'no' to confirmation, ask what to correct and then re-confirm.",
+    },
+  ];
 
   const setupDeepgram = () => {
     deepgramLive = new WebSocket(
@@ -399,16 +388,35 @@ wss.on("connection", (ws) => {
 
     deepgramLive.on("open", () => console.log("🟢 Deepgram Listening"));
 
-    deepgramLive.on("message", (data) => {
+    deepgramLive.on("message", async (data) => {
       if (transferred) return;
 
-      const received = JSON.parse(data);
-      const transcript = received.channel?.alternatives?.[0]?.transcript;
-
-      if (transcript && received.is_final && transcript.trim().length > 0) {
-        console.log(`🗣️ User: ${transcript}`);
-        processUserUtterance(transcript);
+      let received;
+      try {
+        received = JSON.parse(data);
+      } catch {
+        return;
       }
+
+      const transcript = received.channel?.alternatives?.[0]?.transcript;
+      if (!transcript) return;
+
+      // Only act on final transcripts
+      if (!received.is_final) return;
+
+      const text = transcript.trim();
+      if (!text) return;
+
+      // Debounce / prevent rapid-fire finals causing talk-over
+      const now = Date.now();
+      lastFinalAt = now;
+      pendingFinal = text;
+
+      // If currently speaking or processing, wait and process latest
+      if (processing) return;
+      if (isSpeaking && now < speakUntilTs) return;
+
+      await drainPendingFinal();
     });
 
     deepgramLive.on("error", (err) => console.error("DG Error:", err));
@@ -416,131 +424,267 @@ wss.on("connection", (ws) => {
 
   setupDeepgram();
 
-  async function processUserUtterance(text) {
-    if (transferred) return;
+  function readyToConfirm() {
+    // Require carMakeModel so lead insert doesn't violate NOT NULL
+    return Boolean(state.issueText && state.zip && state.name && state.carMakeModel);
+  }
 
-    // Escalation
-    if (wantsHumanFromText(text)) {
-      transferred = true;
-      await safeSpeak("Got it — connecting you to an operator now.");
-      await transferCallToHuman(callSid);
-      try { deepgramLive?.close(); } catch {}
-      try { ws.close(); } catch {}
-      return;
+  async function say(text) {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !streamSid) return;
+
+    // Mark speaking to reduce user-talk-over
+    isSpeaking = true;
+    const ms = estimateSpeakMs(text);
+    speakUntilTs = Date.now() + ms;
+
+    const ok = await speakOverStream({ ws, streamSid, text, deepgramKey: DEEPGRAM_API_KEY });
+    if (!ok) {
+      // if TTS fails, stop "speaking" state quickly
+      speakUntilTs = Date.now() + 300;
     }
 
-    if (!state.carMakeModel) {
-      const c = extractCarMakeModel(text);
-      if (c) state.carMakeModel = c;
-}
-    // Extract + persist state (never clear fields once set)
-    if (!state.name) {
-      const n = extractName(text);
-      if (n) state.name = n;
-    }
+    // Release speaking flag after estimated duration
+    setTimeout(() => {
+      isSpeaking = false;
+    }, ms);
+  }
 
-    if (!state.zip) {
-      const z = extractZip(text);
-      if (z) state.zip = z;
-    }
+  async function drainPendingFinal() {
+    if (!pendingFinal) return;
+    processing = true;
 
-    // Capture issue only if it's not just a name/zip
-    if (!state.issueText) {
-      const looksLikeOnlyName = !!extractName(text) && text.trim().split(/\s+/).length <= 2;
-      const looksLikeOnlyZip = !!extractZip(text) && text.trim().replace(/\D/g, "").length <= 5;
-      if (!looksLikeOnlyName && !looksLikeOnlyZip && text.trim().length >= 6) {
-        state.issueText = text.trim();
-        state.issueCategory = categorizeIssue(state.issueText);
-      }
-    }
+    try {
+      // Grab the most recent final utterance and clear queue
+      const text = pendingFinal;
+      pendingFinal = null;
 
-    // If awaiting confirmation, interpret yes/no
-    if (state.awaitingConfirmation && !state.confirmed) {
-      if (looksLikeYes(text)) {
-        state.confirmed = true;
-        state.awaitingConfirmation = false;
+      console.log(`🗣️ User: ${text}`);
 
-        // Log call outcome (confirmed)
-        await insertCallOutcome({
+      // Human escalation
+      if (wantsHumanFromText(text)) {
+        transferred = true;
+
+        await upsertCallOutcome({
           callSid,
-          callerPhone,
-          name: state.name,
-          zip: state.zip,
-          issueText: state.issueText,
-          issueCategory: state.issueCategory,
-          confirmed: true,
-          outcome: "confirmed",
-          notes: null
+          patch: {
+            caller_phone: callerPhone,
+            name: state.name || null,
+            zip_code: state.zip || null,
+            issue_text: state.issueText || null,
+            issue_category: state.issueCategory || null,
+            confirmed: false,
+            outcome: "transfer_requested",
+            notes: "User requested a human",
+            source: "voice",
+          },
         });
 
-        // Create lead + dispatch
-        if (!state.leadCreated) {
-          state.leadCreated = true;
-          await createLeadAndDispatch({
-            callerPhone,
-            name: state.name,
-            zip: state.zip,
-            issueText: state.issueText,
-            issueCategory: state.issueCategory
-          });
+        await say("Got it — connecting you to an operator now.");
+        await transferCallToHuman(callSid);
+
+        try {
+          if (deepgramLive) deepgramLive.close();
+        } catch {}
+        try {
+          ws.close();
+        } catch {}
+        return;
+      }
+
+      // ALWAYS attempt extraction (independent of other heuristics)
+      if (!state.zip) {
+        const z = extractZip(text);
+        if (z) state.zip = z;
+      }
+      if (!state.name) {
+        const n = extractName(text);
+        if (n) state.name = n;
+      }
+      if (!state.carYear) {
+        const y = extractCarYear(text);
+        if (y) state.carYear = y;
+      }
+      if (!state.carMakeModel) {
+        const mm = extractCarMakeModel(text);
+        if (mm) state.carMakeModel = mm;
+      }
+
+      // Capture issueText once (avoid overwriting with name/zip)
+      if (!state.issueText) {
+        const z = extractZip(text);
+        const n = extractName(text);
+        const mm = extractCarMakeModel(text);
+
+        // If utterance is not just zip/name/vehicle, treat as issue
+        if (!z && !n && !mm && text.length > 6) {
+          state.issueText = text;
+          state.issueCategory = categorizeIssue(text);
         }
 
-        await safeSpeak(`Perfect, ${state.name}. We’ll connect you with a local mechanic now. Thanks for calling MassMechanic!`);
+        // If user says "my car is pulling to the right" etc, we still want to capture issue
+        if (!state.issueText && text.length > 6 && !z && !n) {
+          // allow vehicle phrases to also be issue sometimes — but only if it contains problem keywords
+          if (/(pull|brake|start|overheat|check engine|noise|shake|vibration|ac|battery|transmission|stall)/i.test(text)) {
+            state.issueText = text;
+            state.issueCategory = categorizeIssue(text);
+          }
+        }
+      }
+
+      // If awaiting confirmation, handle yes/no deterministically
+      if (state.awaitingConfirmation && !state.confirmed) {
+        if (looksLikeYes(text)) {
+          state.confirmed = true;
+          state.awaitingConfirmation = false;
+
+          // Log call_outcomes (confirmed)
+          await upsertCallOutcome({
+            callSid,
+            patch: {
+              caller_phone: callerPhone,
+              name: state.name || null,
+              zip_code: state.zip || null,
+              issue_text: state.issueText || null,
+              issue_category: state.issueCategory || null,
+              confirmed: true,
+              outcome: "confirmed",
+              notes: "Confirmed details on call",
+              source: "voice",
+            },
+          });
+
+          // Create lead (if not created already)
+          if (!state.leadCreated) {
+            const leadRes = await createLeadFromCall({ callerPhone, state });
+            if (leadRes.ok) {
+              state.leadCreated = true;
+              console.log("✅ Lead created from voice:", leadRes.lead);
+            }
+          }
+
+          await say(
+            `Perfect — thanks, ${state.name}. We'll connect you with a trusted local mechanic near ZIP ${speakZipDigits(
+              state.zip
+            )}.`
+          );
+          return;
+        }
+
+        if (looksLikeNo(text)) {
+          state.awaitingConfirmation = false;
+          await say("No problem — what should I correct: your ZIP code, your name, the car, or the issue?");
+          return;
+        }
+        // unclear -> fall through
+      }
+
+      // Deterministic follow-ups to reduce “AI weirdness”
+      if (state.issueText && !state.askedFollowup) {
+        state.askedFollowup = true;
+        const followup = FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general;
+        await say(followup);
         return;
       }
 
-      if (looksLikeNo(text)) {
-        state.awaitingConfirmation = false;
-        await safeSpeak("No problem — what should I correct: the ZIP code, your first name, or the issue?");
+      // Ask missing fields in a stable order (issue -> zip -> name -> car)
+      if (!state.issueText) {
+        await say("Tell me what’s going on with your car.");
         return;
       }
 
-      // If unclear, re-ask confirmation once
-      await safeSpeak(buildConfirmLine());
-      return;
-    }
+      if (!state.zip) {
+        await say("What’s your 5-digit ZIP code?");
+        return;
+      }
 
-    // Deterministic follow-up once we have issue
-    if (state.issueText && !state.askedFollowup) {
-      state.askedFollowup = true;
-      const followup = FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general;
-      await safeSpeak(followup);
-      return;
-    }
+      if (!state.name) {
+        await say("And what’s your first name?");
+        return;
+      }
 
-    // Deterministic missing-field questions (prevents the name loop)
-    const q = nextDeterministicQuestion();
-    if (q) {
-      await safeSpeak(q);
-      return;
-    }
+      if (!state.carMakeModel) {
+        await say("What’s the make and model of the car?");
+        return;
+      }
 
-    // If we have everything, move to confirmation
-    if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
-      state.awaitingConfirmation = true;
-      await safeSpeak(buildConfirmLine());
-      return;
-    }
+      // Confirmation (pronounce ZIP with leading zeros)
+      if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
+        state.awaitingConfirmation = true;
 
-    function nextDeterministicQuestion() {
-      if (!state.issueText) return "What problem are you having with the car?";
-      if (!state.zip) return "What’s your 5 digit ZIP code?";
-      if (!state.carMakeModel) return "What’s the car’s make and model?";
-      if (!state.name) return "And what’s your first name?";
-      return null;
+        const zipSpoken = speakZipDigits(state.zip);
+        const carSpoken = `${state.carYear ? state.carYear + " " : ""}${state.carMakeModel}`.trim();
+
+        await say(
+          `To confirm: you're in ZIP ${zipSpoken}, the car is a ${carSpoken}, and the issue is "${state.issueText}". Is that right?`
+        );
+        return;
+      }
+
+      // Backup GPT only if we somehow get here (should be rare)
+      messages.push({ role: "user", content: text });
+
+      const gpt = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          messages: [
+            ...messages,
+            {
+              role: "system",
+              content:
+                `State: name="${state.name}", zip="${state.zip}", car="${state.carYear} ${state.carMakeModel}", ` +
+                `issue="${state.issueText}", category="${state.issueCategory}". ` +
+                `Ask ONE short question that collects missing info or confirms details. Do not ask last name.`,
+            },
+          ],
+          max_tokens: 90,
+        }),
+      });
+
+      const gptJson = await gpt.json();
+      const aiText = gptJson?.choices?.[0]?.message?.content?.trim();
+
+      if (!aiText) {
+        await say("I’m having a quick technical issue. Please text us your ZIP and what’s going on, and we’ll follow up right away.");
+        return;
+      }
+
+      messages.push({ role: "assistant", content: aiText });
+      console.log(`🤖 AI: ${aiText}`);
+      await say(aiText);
+    } catch (e) {
+      console.error("AI/TTS Error:", e);
+      try {
+        await say("Sorry — I had a quick technical glitch. Please text us your ZIP and car issue, and we’ll follow up right away.");
+      } catch {}
+    } finally {
+      processing = false;
+
+      // If another final came in while processing, handle it now (latest wins)
+      if (pendingFinal && !transferred) {
+        // small delay to avoid instant overlap with TTS
+        setTimeout(() => {
+          if (!processing && !(isSpeaking && Date.now() < speakUntilTs)) {
+            drainPendingFinal();
+          }
+        }, 250);
+      }
     }
-    
-    // Fallback: if somehow we’re here, ask the next deterministic question again
-    const q2 = nextDeterministicQuestion();
-    if (q2) await safeSpeak(q2);
   }
 
   ws.on("message", async (msg) => {
-    const data = JSON.parse(msg);
+    let data;
+    try {
+      data = JSON.parse(msg);
+    } catch {
+      return;
+    }
 
     if (data.event === "start") {
       streamSid = data.start.streamSid;
       const params = data.start?.customParameters || {};
+
       const pFrom = normalizePhone(params.from || "");
       const pCaller = normalizePhone(params.caller || "");
       callerPhone = pFrom || pCaller || "unknown";
@@ -548,9 +692,21 @@ wss.on("connection", (ws) => {
 
       console.log("☎️ Stream start", { streamSid, callSid, callerPhone });
 
+      // Create/initialize call_outcomes row (FIX: caller_phone column)
+      await upsertCallOutcome({
+        callSid,
+        patch: {
+          caller_phone: callerPhone,
+          source: "voice",
+          outcome: "in_progress",
+          confirmed: false,
+          notes: null,
+        },
+      });
+
       if (!greeted) {
         greeted = true;
-        await safeSpeak(VOICE_GREETING);
+        await say(VOICE_GREETING);
       }
       return;
     }
@@ -561,27 +717,48 @@ wss.on("connection", (ws) => {
     }
 
     if (data.event === "stop") {
-      try { deepgramLive?.close(); } catch {}
+      // Finalize call outcome if still in progress
+      await upsertCallOutcome({
+        callSid,
+        patch: {
+          caller_phone: callerPhone,
+          name: state.name || null,
+          zip_code: state.zip || null,
+          issue_text: state.issueText || null,
+          issue_category: state.issueCategory || null,
+          confirmed: !!state.confirmed,
+          outcome: state.confirmed ? "completed" : transferred ? "transferred" : "ended_unconfirmed",
+          notes: state.confirmed ? "Call completed after confirmation" : "Call ended before confirmation",
+          source: "voice",
+        },
+      });
+
+      try {
+        if (deepgramLive) deepgramLive.close();
+      } catch {}
       return;
     }
   });
 
   ws.on("close", async () => {
-    try { deepgramLive?.close(); } catch {}
+    try {
+      if (deepgramLive) deepgramLive.close();
+    } catch {}
 
-    // Log incomplete call if we never confirmed
-    if (!state.confirmed) {
-      await insertCallOutcome({
-        callSid,
-        callerPhone,
+    // Best-effort finalize if socket closes unexpectedly
+    await upsertCallOutcome({
+      callSid,
+      patch: {
+        caller_phone: callerPhone,
         name: state.name || null,
-        zip: state.zip || null,
-        issueText: state.issueText || null,
-        issueCategory: state.issueCategory || null,
-        confirmed: false,
-        outcome: "hangup_or_incomplete",
-        notes: null
-      });
-    }
+        zip_code: state.zip || null,
+        issue_text: state.issueText || null,
+        issue_category: state.issueCategory || null,
+        confirmed: !!state.confirmed,
+        outcome: state.confirmed ? "completed" : transferred ? "transferred" : "socket_closed",
+        notes: state.confirmed ? "Socket closed after confirmation" : "Socket closed before confirmation",
+        source: "voice",
+      },
+    });
   });
 });
