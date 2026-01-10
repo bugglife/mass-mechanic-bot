@@ -299,45 +299,73 @@ async function writeCallOutcome({ callSid, callerPhone, confirmed, outcome, name
 }
 
 // Create a lead + invoke send-lead-to-mechanics edge function
-async function createLeadAndDispatch({ callerPhone, name, zip, issueText, issueCategory }) {
+async function createLeadAndDispatch({
+  callerPhone,
+  name,
+  zip,
+  issueText,
+  issueCategory
+}) {
   const zip5 = normalizeZip(zip);
+  const phoneDigits = String(callerPhone || "").replace(/\D/g, "");
 
-  // Minimal lead insert (adjust columns to match your schema)
-  const leadInsert = {
-    source: "voice",
-    phone: String(callerPhone || "").replace(/\D/g, ""), // e.g. 1XXXXXXXXXX
-    customer_name: name || null,
-    zip_code: zip5 || null,
-    description: issueText || null,
-    service_type: SERVICE_TYPE_BY_CATEGORY[issueCategory] || SERVICE_TYPE_BY_CATEGORY.general,
-    lead_category: "repair" // keep consistent with your edge function skip logic
+  const serviceType =
+    SERVICE_TYPE_BY_CATEGORY[issueCategory] ||
+    SERVICE_TYPE_BY_CATEGORY.general;
+
+  const leadPayload = {
+    service_type: serviceType,
+    zip_code: zip5,
+    description: issueText,
+    name: name || null,
+    phone: phoneDigits || null,
+    email: null,
+
+    lead_source: "voice",
+    lead_category: "repair",
+    status: "new",
+
+    lead_tier: "standard",
+    lead_score_total: 0,
+
+    drivable: null,
+    urgency_window: null
   };
 
   const { data: lead, error } = await supabase
     .from("leads")
-    .insert(leadInsert)
+    .insert(leadPayload)
     .select("id, lead_code")
     .maybeSingle();
 
   if (error || !lead?.id) {
-    console.error("❌ Lead insert failed:", error?.message || "no lead returned");
+    console.error("❌ Lead insert failed:", error?.message || error);
     return { ok: false, error: error?.message || "lead_insert_failed" };
   }
 
-  // Invoke your edge function to send lead to mechanics
+  console.log("✅ Lead created:", {
+    id: lead.id,
+    lead_code: lead.lead_code,
+    zip: zip5,
+    service_type: serviceType
+  });
+
+  // Fire-and-forget dispatch to mechanics
   try {
-    const { data: invokeData, error: invokeErr } = await supabase.functions.invoke("send-lead-to-mechanics", {
-      body: { lead_id: lead.id }
-    });
+    const { error: invokeErr } =
+      await supabase.functions.invoke("send-lead-to-mechanics", {
+        body: { lead_id: lead.id }
+      });
+
     if (invokeErr) {
-      console.error("❌ send-lead-to-mechanics invoke failed:", invokeErr.message);
-      return { ok: true, lead, dispatch_ok: false, dispatch_error: invokeErr.message };
+      console.error("⚠️ send-lead-to-mechanics failed:", invokeErr.message);
     }
-    return { ok: true, lead, dispatch_ok: true, dispatch_result: invokeData };
   } catch (e) {
-    console.error("❌ send-lead-to-mechanics exception:", e?.message || e);
-    return { ok: true, lead, dispatch_ok: false, dispatch_error: e?.message || "invoke_exception" };
+    console.error("⚠️ send-lead-to-mechanics exception:", e?.message || e);
   }
+
+  return { ok: true, lead };
+}
 }
 
 // ────────────────────────────────────────────────────────────
