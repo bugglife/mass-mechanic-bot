@@ -37,6 +37,12 @@ function extractZip(text = "") {
 function extractName(text = "") {
   const original = String(text).trim();
   
+  // CRITICAL: Don't extract if text contains car problem keywords
+  // This prevents extracting "leaking", "pulling", "grinding" etc as names
+  if (/(leak|leaking|pull|pulling|brake|braking|start|starting|overheat|check|engine|noise|rattle|clunk|grind|grinding|squeal|shake|vibration|smoke|stall|idle|rough|slip|slipping|shift|puddle|under)/i.test(original)) {
+    return "";
+  }
+  
   // Pattern 1: "My name is ___", "This is ___", "I'm ___", "It's ___", "Call me ___"
   const patterns = [
     /(?:my name is|my name's|this is|i'm|im|i am|it'?s|call me|they call me)\s+([a-z]{2,}(?:\s+[a-z]+)?)\b/i,
@@ -47,30 +53,30 @@ function extractName(text = "") {
     if (m?.[1]) {
       const extracted = m[1].trim();
       // Make sure it's not a common false positive
-      if (!/^(the|that|this|there|here|what|when|where|how|why|my|hi|hello)$/i.test(extracted)) {
+      if (!/^(the|that|this|there|here|what|when|where|how|why|my|hi|hello|leak|leaking|pull|pulling)$/i.test(extracted)) {
         return extracted;
       }
     }
   }
   
-  // Pattern 2: Just a name by itself
+  // Pattern 2: Just a name by itself (very conservative now)
   // Remove all non-letter characters except spaces
   const cleaned = original.replace(/[^a-zA-Z\s]/g, '').trim();
   const words = cleaned.split(/\s+/).filter(w => w.length >= 2);
   
-  // Single word that looks like a name (2-20 chars)
-  if (words.length === 1 && words[0].length >= 2 && words[0].length <= 20) {
+  // Single word that looks like a name (2-15 chars, more strict)
+  if (words.length === 1 && words[0].length >= 2 && words[0].length <= 15) {
     const word = words[0];
-    // Exclude common words that might be misheard
-    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|can't|don't|won't|hi|hello|hey)$/i.test(word)) {
+    // Much longer exclusion list
+    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke)$/i.test(word)) {
       return word;
     }
   }
   
-  // Two words - take the first (likely first name)
-  if (words.length === 2 && words[0].length >= 2 && words[0].length <= 20) {
+  // Two words - take the first (likely first name) - but be very strict
+  if (words.length === 2 && words[0].length >= 2 && words[0].length <= 15) {
     const word = words[0];
-    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|can't|don't|won't|hi|hello|hey)$/i.test(word)) {
+    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke)$/i.test(word)) {
       return word;
     }
   }
@@ -93,12 +99,12 @@ function extractCarMakeModel(text = "") {
   if (cleaned.length < 6) return "";
   
   // Exclude if it contains car problem keywords (these are issue descriptions, not car models)
-  if (/(steering|wheel|pull|pulling|brake|start|overheat|check|engine|noise|rattle|clunk|grind|squeal|shake|vibration|leak|smoke|stall|idle|rough|slipping|shift)/i.test(cleaned)) {
+  if (/(steering|wheel|pull|pulling|brake|start|overheat|check|engine|noise|rattle|clunk|grind|squeal|shake|vibration|leak|leaking|smoke|stall|idle|rough|slipping|shift|puddle)/i.test(cleaned)) {
     return "";
   }
   
   // Exclude greetings and common phrases
-  if (/^(hi|hello|hey|my|me|i|the|this|that|is|it)\b/i.test(cleaned)) {
+  if (/^(hi|hello|hey|my|me|i|the|this|that|is|it|there)\b/i.test(cleaned)) {
     return "";
   }
     
@@ -140,6 +146,7 @@ function categorizeIssue(text = "") {
   if (/(battery|alternator|charging|lights dim|electrical)/i.test(t)) return "electrical";
   if (/(flat tire|tire|puncture|blowout)/i.test(t)) return "tire";
   if (/(noise|rattle|clunk|knock)/i.test(t)) return "noise";
+  if (/(leak|leaking|fluid|puddle|drip|dripping)/i.test(t)) return "leak";
   
   return "general";
 }
@@ -157,6 +164,7 @@ function serviceTypeFromCategory(cat = "general") {
     electrical: "electrical",
     tire: "tire-service",
     noise: "noise-diagnosis",
+    leak: "leak-diagnosis",
     general: "general-repair",
   };
   return map[cat] || "general-repair";
@@ -173,6 +181,7 @@ const FOLLOWUP_BY_CATEGORY = {
   electrical: "Got it. Are you seeing dimming lights, a battery warning, or intermittent power issues? When did it start?",
   tire: "Okay. Is the tire flat right now, or losing air slowly?",
   noise: "I hear you. Is it more like a clunk, knock, or rattle, and does it happen over bumps, turning, or accelerating?",
+  leak: "Understood. What color is the fluid? And is it leaking while parked or only when running?",
   general: "Okay, tell me more about what's happening.",
 };
 
@@ -384,7 +393,7 @@ async function upsertCallOutcome({ callSid, patch }) {
   }
 }
 
-// Create a lead in Supabase after confirmation
+// Create a lead in Supabase after confirmation - FIXED email field requirement
 async function createLeadFromCall({ callerPhone, state }) {
   try {
     const payload = {
@@ -395,6 +404,7 @@ async function createLeadFromCall({ callerPhone, state }) {
       description: state.issueText || "",
       name: state.name || null,
       phone: callerPhone || null,
+      email: null, // Voice calls don't collect email - set to null explicitly
       lead_source: "voice",
       status: "new",
       lead_category: "repair",
@@ -459,6 +469,8 @@ wss.on("connection", (ws) => {
     drivable: "",
     urgency_window: "",
     leadCreated: false,
+    // Track which step we're on to prevent wrong extractions
+    currentStep: "issue", // issue, followup, car, name, zip, confirm
   };
   
   // Keep GPT as "backup"
@@ -602,15 +614,15 @@ wss.on("connection", (ws) => {
         if (text.length > 3) {
           state.issueText = `${state.issueText}. ${text}`;
           state.awaitingFollowupResponse = false;
+          state.currentStep = "car"; // Move to next step
           console.log(`✅ Added followup details: ${text}`);
         }
       }
       
-      // Extract data ONLY when we're explicitly asking for it
-      // This prevents false extractions from issue descriptions
+      // Extract data based on current step to prevent wrong extractions
       
-      // Only extract ZIP when we don't have it yet
-      if (!state.zip) {
+      // Only extract ZIP when we're on the zip step
+      if (state.currentStep === "zip" && !state.zip) {
         const z = extractZip(text);
         if (z) {
           state.zip = z;
@@ -618,8 +630,8 @@ wss.on("connection", (ws) => {
         }
       }
       
-      // Only extract name when we don't have it yet
-      if (!state.name) {
+      // Only extract name when we're on the name step
+      if (state.currentStep === "name" && !state.name) {
         const n = extractName(text);
         if (n) {
           state.name = n;
@@ -627,25 +639,27 @@ wss.on("connection", (ws) => {
         }
       }
       
-      // Only extract car when we don't have it yet
-      if (!state.carYear) {
-        const y = extractCarYear(text);
-        if (y) {
-          state.carYear = y;
-          console.log(`✅ Extracted year: ${y}`);
+      // Only extract car when we're on the car step
+      if (state.currentStep === "car") {
+        if (!state.carYear) {
+          const y = extractCarYear(text);
+          if (y) {
+            state.carYear = y;
+            console.log(`✅ Extracted year: ${y}`);
+          }
         }
-      }
-      
-      if (!state.carMakeModel) {
-        const mm = extractCarMakeModel(text);
-        if (mm) {
-          state.carMakeModel = mm;
-          console.log(`✅ Extracted car: ${mm}`);
+        
+        if (!state.carMakeModel) {
+          const mm = extractCarMakeModel(text);
+          if (mm) {
+            state.carMakeModel = mm;
+            console.log(`✅ Extracted car: ${mm}`);
+          }
         }
       }
       
       // Capture issueText once (avoid overwriting with name/zip)
-      if (!state.issueText) {
+      if (state.currentStep === "issue" && !state.issueText) {
         const z = extractZip(text);
         const n = extractName(text);
         
@@ -709,6 +723,7 @@ wss.on("connection", (ws) => {
       
       // Step 1: Get the issue
       if (!state.issueText) {
+        state.currentStep = "issue";
         await say("Tell me what's wrong with your car.");
         return;
       }
@@ -717,6 +732,7 @@ wss.on("connection", (ws) => {
       if (state.issueText && !state.askedFollowup) {
         state.askedFollowup = true;
         state.awaitingFollowupResponse = true;
+        state.currentStep = "followup";
         const followup = FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general;
         await say(followup);
         return;
@@ -724,18 +740,21 @@ wss.on("connection", (ws) => {
       
       // Step 3: Get car make/model/year
       if (!state.carMakeModel) {
+        state.currentStep = "car";
         await say("What's the make and model of your car?");
         return;
       }
       
       // Step 4: Get name
       if (!state.name) {
+        state.currentStep = "name";
         await say("And what's your first name?");
         return;
       }
       
       // Step 5: Get ZIP code
       if (!state.zip) {
+        state.currentStep = "zip";
         await say("What's your 5-digit ZIP code?");
         return;
       }
@@ -743,6 +762,7 @@ wss.on("connection", (ws) => {
       // Step 6: Confirmation
       if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
         state.awaitingConfirmation = true;
+        state.currentStep = "confirm";
         const zipSpoken = speakZipDigits(state.zip);
         const carSpoken = `${state.carYear ? state.carYear + " " : ""}${state.carMakeModel}`.trim();
         await say(
