@@ -48,6 +48,8 @@ function extractName(text = "") {
   if (/^[A-Za-z]{2,}$/.test(cleaned) && cleaned.length <= 20) return cleaned;
 
   return "";
+
+  let nameAskCount = 0;
 }
 
 function extractCarYear(text = "") {
@@ -515,9 +517,14 @@ wss.on("connection", (ws) => {
         if (z) state.zip = z;
       }
       if (!state.name) {
-        const n = extractName(text);
-        if (n) state.name = n;
-      }
+  nameAskCount += 1;
+  if (nameAskCount >= 2) {
+    await say("Sorry — I didn’t catch that. You can say just your first name, like 'Tom'.");
+  } else {
+    await say("And what’s your first name?");
+  }
+  return;
+}
       if (!state.carYear) {
         const y = extractCarYear(text);
         if (y) state.carYear = y;
