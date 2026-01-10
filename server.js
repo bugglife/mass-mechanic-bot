@@ -34,14 +34,19 @@ function extractZip(text = "") {
 }
 
 function extractName(text = "") {
-  const t = String(text).trim();
+  const raw = String(text).trim();
+  if (!raw) return "";
 
-  // “My name is ___”, “This is ___”, “I’m ___”
-  const m = t.match(/\b(my name is|this is|i'm|im)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)\b/i);
+  // strip punctuation around words (so "Tom." becomes "Tom")
+  const cleaned = raw.replace(/[^A-Za-z\s']/g, " ").replace(/\s+/g, " ").trim();
+
+  // “my name is ___”, “this is ___”, “i'm ___”
+  const m = cleaned.match(/\b(my name is|this is|i am|i'm|im)\s+([A-Za-z]{2,}(?:\s+[A-Za-z]{2,})?)\b/i);
   if (m?.[2]) return m[2].trim();
 
-  // single first name (avoid grabbing random phrases)
-  if (/^[A-Za-z]{2,}$/.test(t) && t.length <= 20) return t;
+  // Single first name only (avoid grabbing sentences)
+  if (/^[A-Za-z]{2,}$/.test(cleaned) && cleaned.length <= 20) return cleaned;
+
   return "";
 }
 
