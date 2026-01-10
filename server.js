@@ -272,7 +272,7 @@ async function insertCallOutcome({
   }
 }
 
-async function createLeadAndDispatch({ callerPhone, name, zip, issueText, issueCategory }) {
+async function createLeadAndDispatch({ callerPhone, name, zip, issueText, issueCategory, carMakeModel }) {
   const zip5 = normalizeZip(zip);
   const phoneDigits = String(callerPhone || "").replace(/\D/g, "");
 
