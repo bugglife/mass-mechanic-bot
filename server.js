@@ -283,19 +283,26 @@ app.post("/voice", (req, res) => {
 
 app.post("/transfer", (req, res) => {
   res.type("text/xml");
-  if (!ADMIN_ESCALATION_PHONE) {
-    return res.send(`
-<Response>
-  <Say>Sorry, no operator is available right now.</Say>
-  <Hangup/>
-</Response>
-    `);
-  }
+
+  const OUTBOUND_CALLER_ID = "+16173153444"; // what calls you (must be a Twilio number on your account)
+  const ADMIN_DESTINATION  = "+16782003064"; // your admin phone
+
   return res.send(`
 <Response>
   <Say>Connecting you now.</Say>
-  <Dial timeout="25" answerOnBridge="true">${ADMIN_ESCALATION_PHONE}</Dial>
+  <Dial callerId="${OUTBOUND_CALLER_ID}" timeout="25" answerOnBridge="true">
+    ${ADMIN_DESTINATION}
+  </Dial>
   <Say>Sorry — nobody answered. Please text us and we will follow up.</Say>
+  <Hangup/>
+</Response>
+  `);
+});
+
+app.post("/hangup", (req, res) => {
+  res.type("text/xml");
+  return res.send(`
+<Response>
   <Hangup/>
 </Response>
   `);
