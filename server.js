@@ -308,15 +308,6 @@ app.post("/hangup", (req, res) => {
   `);
 });
 
-app.post("/hangup", (req, res) => {
-  res.type("text/xml");
-  res.send(`
-<Response>
-  <Hangup/>
-</Response>
-  `);
-});
-
 const VOICE_GREETING = "Thanks for calling Mass Mechanic — we connect you with trusted local mechanics for fast, free repair quotes. Tell me what's wrong with your car or ask me a quick question.";
 
 //────────────────────────────────────────────────────────────────────────────────
