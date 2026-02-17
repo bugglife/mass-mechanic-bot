@@ -869,6 +869,13 @@ app.get('/webhook/messenger', (req, res) => {
   const token = req.query['hub.token'];
   const challenge = req.query['hub.challenge'];
   
+  // DEBUG LOGGING
+  console.log('🔍 Webhook verification attempt:');
+  console.log('  Mode:', mode);
+  console.log('  Token from request:', token);
+  console.log('  Expected token:', VERIFY_TOKEN);
+  console.log('  Match:', token === VERIFY_TOKEN);
+  
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
     console.log('✅ Webhook verified');
     res.status(200).send(challenge);
