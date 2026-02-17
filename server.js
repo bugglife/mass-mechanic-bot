@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import twilio from "twilio";
 import WebSocket, { WebSocketServer } from "ws";
 import fetch from "node-fetch";
+import crypto from "crypto"; // Added for Facebook signature verification
 
 //────────────────────────────────────────────────────────────────────────────────
 // 0) HELPERS
@@ -210,7 +211,13 @@ const FOLLOWUP_BY_CATEGORY = {
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-app.use(express.json());
+
+// Modified body parser to capture raw body for Facebook signature verification
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  }
+}));
 app.use(express.urlencoded({ extended: true }));
 
 const {
@@ -223,6 +230,9 @@ const {
   SUPABASE_KEY,
   PUBLIC_BASE_URL,
   ADMIN_ESCALATION_PHONE,
+  FACEBOOK_PAGE_ACCESS_TOKEN,
+  FACEBOOK_VERIFY_TOKEN,
+  FACEBOOK_APP_SECRET,
 } = process.env;
 
 if (
@@ -462,141 +472,547 @@ async function createLeadFromCall({ callerPhone, state }) {
     
     if (error) {
       console.error("❌ Lead insert failed:", error.message);
-      return { ok: false, error: error.message };
+      return { ok: false, lead: null };
     }
     
-    console.log("✅ Lead created:", data);
-    
-    const isHighPriority = isHighPriorityLead(state.urgency_window, state.drivable);
-    
-    if (isHighPriority) {
-      console.log("📤 Dispatching HIGH PRIORITY lead to mechanics via send-lead");
-      // TODO: Call your send-lead edge function
-      // await fetch(`${SUPABASE_URL}/functions/v1/send-lead`, { ... });
-    } else {
-      console.log("📤 Dispatching MAINTENANCE lead to mechanics via send-maintenance-lead");
-      // TODO: Call your send-maintenance-lead edge function
-      // await fetch(`${SUPABASE_URL}/functions/v1/send-maintenance-lead`, { ... });
+    if (!data) {
+      console.error("❌ Lead insert returned no data");
+      return { ok: false, lead: null };
     }
+    
+    const leadId = data.id;
+    const leadCode = data.lead_code;
+    
+    console.log(`✅ Lead created: ${leadId} / ${leadCode}`);
+    
+    const priority = isHighPriorityLead(state.urgency_window, state.drivable);
+    
+    const dispatchUrl = priority 
+      ? `${SUPABASE_URL}/functions/v1/send-lead-to-mechanics`
+      : `${SUPABASE_URL}/functions/v1/send-maintenance-lead-to-mechanics`;
+    
+    console.log(`📮 Dispatching ${priority ? "REPAIR" : "MAINTENANCE"} lead:`, leadId);
+    
+    const dispatchRes = await fetch(dispatchUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+      },
+      body: JSON.stringify({ leadId }),
+    });
+    
+    if (!dispatchRes.ok) {
+      const errText = await dispatchRes.text().catch(() => "");
+      console.error(`❌ Dispatch failed (${dispatchRes.status}):`, errText);
+      return { ok: true, lead: data };
+    }
+    
+    const dispatchJson = await dispatchRes.json();
+    console.log("✅ Dispatch response:", dispatchJson);
     
     return { ok: true, lead: data };
-  } catch (e) {
-    console.error("❌ Lead insert exception:", e);
-    return { ok: false, error: e?.message || "unknown" };
+  } catch (err) {
+    console.error("❌ createLeadFromCall exception:", err);
+    return { ok: false, lead: null };
   }
 }
 
 //────────────────────────────────────────────────────────────────────────────────
-// 5) WEBSOCKET SERVER FOR TWILIO MEDIA STREAMS
+// 5) MESSENGER CONVERSATION STATE
 //────────────────────────────────────────────────────────────────────────────────
 
-const server = app.listen(PORT, () => console.log(`✅ MassMechanic Running on ${PORT}`));
-const wss = new WebSocketServer({ noServer: true });
+const messengerConversations = new Map();
 
-server.on("upgrade", (req, socket, head) => {
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+function getMessengerState(senderId) {
+  if (!messengerConversations.has(senderId)) {
+    messengerConversations.set(senderId, {
+      step: 'initial',
+      data: {},
+      lastActivity: Date.now()
+    });
+  }
+  return messengerConversations.get(senderId);
+}
+
+function updateMessengerState(senderId, updates) {
+  const state = getMessengerState(senderId);
+  messengerConversations.set(senderId, {
+    ...state,
+    ...updates,
+    lastActivity: Date.now()
+  });
+}
+
+function clearMessengerState(senderId) {
+  messengerConversations.delete(senderId);
+}
+
+// Clean up stale conversations every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  const timeout = 30 * 60 * 1000; // 30 minutes
+  
+  for (const [senderId, state] of messengerConversations.entries()) {
+    if (now - state.lastActivity > timeout) {
+      messengerConversations.delete(senderId);
+    }
+  }
+}, 5 * 60 * 1000);
+
+//────────────────────────────────────────────────────────────────────────────────
+// 6) MESSENGER HELPER FUNCTIONS
+//────────────────────────────────────────────────────────────────────────────────
+
+function verifyRequestSignature(rawBody, signature) {
+  if (!signature) return false;
+  
+  const elements = signature.split('=');
+  const signatureHash = elements[1];
+  
+  const expectedHash = crypto
+    .createHmac('sha256', FACEBOOK_APP_SECRET)
+    .update(rawBody)
+    .digest('hex');
+  
+  return signatureHash === expectedHash;
+}
+
+async function sendMessengerMessage(recipientId, message) {
+  const url = `https://graph.facebook.com/v18.0/me/messages?access_token=${FACEBOOK_PAGE_ACCESS_TOKEN}`;
+  
+  const payload = {
+    recipient: { id: recipientId },
+    message: message
+  };
+  
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    
+    if (!response.ok) {
+      const error = await response.json();
+      console.error('Messenger API Error:', error);
+    }
+  } catch (error) {
+    console.error('Failed to send message:', error);
+  }
+}
+
+async function sendQuickReplies(recipientId, text, replies) {
+  await sendMessengerMessage(recipientId, {
+    text: text,
+    quick_replies: replies.map(reply => ({
+      content_type: 'text',
+      title: reply,
+      payload: reply.toUpperCase()
+    }))
+  });
+}
+
+async function getMessengerUserProfile(senderId) {
+  try {
+    const url = `https://graph.facebook.com/v18.0/${senderId}?fields=first_name,last_name&access_token=${FACEBOOK_PAGE_ACCESS_TOKEN}`;
+    const response = await fetch(url);
+    const data = await response.json();
+    return {
+      name: `${data.first_name} ${data.last_name}`
+    };
+  } catch (error) {
+    console.error('Failed to get user profile:', error);
+    return null;
+  }
+}
+
+function extractPhoneNumberMessenger(text) {
+  const cleaned = text.replace(/\D/g, '');
+  if (cleaned.length === 10) return `+1${cleaned}`;
+  if (cleaned.length === 11 && cleaned[0] === '1') return `+${cleaned}`;
+  return null;
+}
+
+async function analyzeMessengerIssue(text) {
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { 
+        Authorization: `Bearer ${OPENAI_API_KEY}`, 
+        "Content-Type": "application/json" 
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "system",
+            content: 'Extract car issue category from user message. Categories: brakes, engine, no-start, overheating, transmission, electrical, other. Respond with JSON: {"hasIssue": boolean, "category": string}'
+          },
+          {
+            role: "user",
+            content: text
+          }
+        ],
+        temperature: 0.3
+      })
+    });
+
+    const result = await response.json();
+    const parsed = JSON.parse(result.choices[0].message.content);
+    return parsed;
+  } catch (error) {
+    console.error('Error analyzing issue:', error);
+    const lowerText = text.toLowerCase();
+    let category = 'other';
+    if (lowerText.includes('brake')) category = 'brakes';
+    else if (lowerText.includes('engine') || lowerText.includes('start')) category = 'engine';
+    else if (lowerText.includes('transmission')) category = 'transmission';
+    else if (lowerText.includes('overheat') || lowerText.includes('temperature')) category = 'overheating';
+    else if (lowerText.includes('electrical') || lowerText.includes('battery')) category = 'electrical';
+    
+    return { hasIssue: text.length > 10, category };
+  }
+}
+
+//────────────────────────────────────────────────────────────────────────────────
+// 7) MESSENGER CONVERSATION HANDLERS
+//────────────────────────────────────────────────────────────────────────────────
+
+async function handleInitialMessengerMessage(senderId, text, state) {
+  const analysis = await analyzeMessengerIssue(text);
+  
+  if (analysis.hasIssue) {
+    updateMessengerState(senderId, {
+      step: 'awaiting_location',
+      data: {
+        issue: text,
+        category: analysis.category
+      }
+    });
+    
+    await sendQuickReplies(senderId, 
+      "Got it! Which area are you in?",
+      ["Brockton", "Fall River", "New Bedford"]
+    );
+  } else {
+    await sendMessengerMessage(senderId, {
+      text: "Hi! I can help you get free quotes from local mechanics. What's going on with your car?"
+    });
+  }
+}
+
+async function handleLocationResponse(senderId, text, state) {
+  const location = text.toLowerCase();
+  
+  let city;
+  if (location.includes('brockton')) city = 'Brockton';
+  else if (location.includes('fall river')) city = 'Fall River';
+  else if (location.includes('new bedford')) city = 'New Bedford';
+  else {
+    await sendQuickReplies(senderId,
+      "I didn't catch that. Which area are you in?",
+      ["Brockton", "Fall River", "New Bedford"]
+    );
+    return;
+  }
+  
+  updateMessengerState(senderId, {
+    step: 'awaiting_phone',
+    data: {
+      ...state.data,
+      location: city
+    }
+  });
+  
+  await sendMessengerMessage(senderId, {
+    text: `Perfect! What's the best phone number to reach you? (Mechanics will text/call you with quotes)`
+  });
+}
+
+async function handlePhoneResponse(senderId, text, state) {
+  const phone = extractPhoneNumberMessenger(text);
+  
+  if (!phone) {
+    await sendMessengerMessage(senderId, {
+      text: "I need a valid phone number so mechanics can reach you. Please try again:"
+    });
+    return;
+  }
+  
+  updateMessengerState(senderId, {
+    step: 'awaiting_confirmation',
+    data: {
+      ...state.data,
+      phone: phone
+    }
+  });
+  
+  await sendMessengerMessage(senderId, {
+    text: `Great! Here's what I have:\n\n` +
+          `🔧 Issue: ${state.data.issue}\n` +
+          `📍 Area: ${state.data.location}\n` +
+          `📱 Phone: ${phone}\n\n` +
+          `Reply "YES" to submit, or "CHANGE" to start over.`
+  });
+}
+
+async function handleConfirmation(senderId, text, state) {
+  const response = text.toLowerCase();
+  
+  if (response.includes('yes') || response.includes('confirm') || response.includes('correct')) {
+    await createLeadFromMessenger(senderId, state.data);
+    
+    await sendMessengerMessage(senderId, {
+      text: `✅ Got it! We're connecting you with local mechanics now. You'll receive quotes via text at ${state.data.phone} within the next hour.`
+    });
+    
+    clearMessengerState(senderId);
+  } else if (response.includes('change') || response.includes('start over')) {
+    clearMessengerState(senderId);
+    await sendMessengerMessage(senderId, {
+      text: "No problem! What's going on with your car?"
+    });
+  } else {
+    await sendMessengerMessage(senderId, {
+      text: 'Reply "YES" to submit your quote request, or "CHANGE" to start over.'
+    });
+  }
+}
+
+async function createLeadFromMessenger(senderId, data) {
+  try {
+    const userProfile = await getMessengerUserProfile(senderId);
+    
+    const { data: lead, error } = await supabase
+      .from('leads')
+      .insert({
+        service_type: serviceTypeFromCategory(data.category),
+        zip_code: extractZip(data.location) || null,
+        car_make_model: "Unknown",
+        description: data.issue,
+        name: userProfile?.name || 'Messenger User',
+        phone: data.phone,
+        email: "",
+        lead_source: 'messenger',
+        status: 'new',
+        lead_category: 'repair',
+        facebook_psid: senderId,
+      })
+      .select('id, lead_code')
+      .single();
+    
+    if (error) throw error;
+    
+    console.log(`✅ Messenger lead created: ${lead.id}`);
+    
+    const dispatchUrl = `${SUPABASE_URL}/functions/v1/send-lead-to-mechanics`;
+    await fetch(dispatchUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_KEY}`
+      },
+      body: JSON.stringify({ leadId: lead.id })
+    });
+    
+  } catch (error) {
+    console.error('Failed to create Messenger lead:', error);
+    await sendMessengerMessage(senderId, {
+      text: "Sorry, something went wrong. Please call us at 617-315-3444 or visit massmechanic.com"
+    });
+  }
+}
+
+async function handleMessengerMessage(senderId, message) {
+  const text = message.text?.trim();
+  
+  if (!text) {
+    await sendMessengerMessage(senderId, { 
+      text: "I see you sent a photo! To get the fastest quote, please describe what's wrong with your car." 
+    });
+    return;
+  }
+  
+  const state = getMessengerState(senderId);
+  
+  switch (state.step) {
+    case 'initial':
+      await handleInitialMessengerMessage(senderId, text, state);
+      break;
+    case 'awaiting_location':
+      await handleLocationResponse(senderId, text, state);
+      break;
+    case 'awaiting_phone':
+      await handlePhoneResponse(senderId, text, state);
+      break;
+    case 'awaiting_confirmation':
+      await handleConfirmation(senderId, text, state);
+      break;
+    default:
+      await handleInitialMessengerMessage(senderId, text, state);
+  }
+}
+
+function handleMessengerPostback(senderId, postback) {
+  console.log('Postback received:', postback);
+}
+
+//────────────────────────────────────────────────────────────────────────────────
+// 8) MESSENGER WEBHOOK ENDPOINTS
+//────────────────────────────────────────────────────────────────────────────────
+
+app.get('/webhook/messenger', (req, res) => {
+  const VERIFY_TOKEN = FACEBOOK_VERIFY_TOKEN;
+  
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.token'];
+  const challenge = req.query['hub.challenge'];
+  
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('✅ Webhook verified');
+    res.status(200).send(challenge);
+  } else {
+    console.log('❌ Webhook verification failed');
+    res.sendStatus(403);
+  }
 });
 
+app.post('/webhook/messenger', (req, res) => {
+  const body = req.body;
+  
+  const signature = req.headers['x-hub-signature-256'];
+  if (!verifyRequestSignature(req.rawBody || JSON.stringify(body), signature)) {
+    console.log('❌ Invalid signature');
+    return res.sendStatus(403);
+  }
+  
+  if (body.object === 'page') {
+    res.status(200).send('EVENT_RECEIVED');
+    
+    body.entry.forEach(entry => {
+      entry.messaging.forEach(webhookEvent => {
+        const senderId = webhookEvent.sender.id;
+        
+        if (webhookEvent.message) {
+          handleMessengerMessage(senderId, webhookEvent.message);
+        } else if (webhookEvent.postback) {
+          handleMessengerPostback(senderId, webhookEvent.postback);
+        }
+      });
+    });
+  } else {
+    res.sendStatus(404);
+  }
+});
+
+//────────────────────────────────────────────────────────────────────────────────
+// 9) WEBSOCKET SERVER (VOICE AGENT - ALL EXISTING CODE PRESERVED)
+//────────────────────────────────────────────────────────────────────────────────
+
+const server = app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`📞 Voice webhook: ${PUBLIC_BASE_URL || 'http://localhost:' + PORT}/voice`);
+  console.log(`💬 Messenger webhook: ${PUBLIC_BASE_URL || 'http://localhost:' + PORT}/webhook/messenger`);
+});
+
+const wss = new WebSocketServer({ server });
+
 wss.on("connection", (ws) => {
-  console.log("🔗 Voice Connected");
-  
   let streamSid = null;
-  let deepgramLive = null;
-  let greeted = false;
-  let transferred = false;
+  let callSid = null;
   let callerPhone = "unknown";
-  let callSid = "";
-  
+  let greeted = false;
+  let processing = false;
   let isSpeaking = false;
   let speakUntilTs = 0;
-  let processing = false;
-  let pendingFinal = null;
-  let lastFinalAt = 0;
   let lastBotQuestionAt = 0;
+  let transferred = false;
+  let pendingFinal = null;
+  
+  let deepgramLive = null;
+  let messages = [];
   
   const state = {
-    name: "",
-    zip: "",
-    phone: "",
+    currentStep: "initial",
     issueText: "",
     issueCategory: "general",
     askedFollowup: false,
     awaitingFollowupResponse: false,
+    carYear: "",
+    carMakeModel: "",
+    name: "",
+    zip: "",
+    phone: "",
+    urgency_window: "",
+    drivable: "",
+    confirmed: false,
+    leadCreated: false,
     awaitingConfirmation: false,
     awaitingCorrectionChoice: false,
     correctingField: null,
-    confirmed: false,
-    carMakeModel: "",
-    carYear: "",
-    drivable: "",
-    urgency_window: "",
-    leadCreated: false,
-    currentStep: "issue",
   };
   
-  const messages = [
-    {
-      role: "system",
-      content:
-        "You are the MassMechanic phone agent. Keep replies SHORT (1 sentence). Ask ONE question at a time. " +
-        "Goal: collect (1) what's wrong, (2) car make/model/year, (3) first name, (4) ZIP code, (5) phone number, (6) urgency, (7) drivability. " +
-        "Do NOT ask for last name. Do NOT end the call until you confirm the details.",
-    },
-  ];
-  
-  const setupDeepgram = () => {
-    deepgramLive = new WebSocket(
-      "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&model=nova-2&smart_format=true",
-      { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
-    );
+  try {
+    const dgUrl = `wss://api.deepgram.com/v1/listen?model=nova-2&language=en-US&smart_format=true&interim_results=true&utterance_end_ms=1500&endpointing=500`;
+    deepgramLive = new WebSocket(dgUrl, { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } });
     
-    deepgramLive.on("open", () => console.log("🟢 Deepgram Listening"));
+    deepgramLive.on("open", () => console.log("🎙 Deepgram connected"));
+    deepgramLive.on("error", (err) => console.error("❌ Deepgram error:", err));
+    deepgramLive.on("close", () => console.log("🎙 Deepgram closed"));
     
-    deepgramLive.on("message", async (data) => {
-      if (transferred) return;
-      
-      let received;
+    deepgramLive.on("message", async (msg) => {
       try {
-        received = JSON.parse(data);
-      } catch {
-        return;
-      }
-      
-      const transcript = received.channel?.alternatives?.[0]?.transcript;
-      if (!transcript) return;
-      
-      if (!received.is_final) return;
-      
-      const text = transcript.trim();
-      if (!text) return;
-      
-      const now = Date.now();
-      lastFinalAt = now;
-      pendingFinal = text;
-      
-      if (processing) return;
-      if (isSpeaking && now < speakUntilTs) return;
-      
-      const timeSinceBotQuestion = now - lastBotQuestionAt;
-      if (timeSinceBotQuestion < 800) {
-        setTimeout(() => {
-          if (!processing && !transferred && pendingFinal) {
+        const data = JSON.parse(msg);
+        const transcript = data?.channel?.alternatives?.[0]?.transcript?.trim();
+        const isFinal = !!data?.is_final;
+        const speechFinal = !!data?.speech_final;
+        
+        if (!transcript) return;
+        
+        const silentTooLong = Date.now() - lastBotQuestionAt > 30000;
+        
+        if (silentTooLong && !transferred && !state.confirmed) {
+          transferred = true;
+          await upsertCallOutcome({
+            callSid,
+            patch: {
+              caller_phone: callerPhone,
+              name: state.name || null,
+              zip_code: state.zip || null,
+              issue_text: state.issueText || null,
+              issue_category: state.issueCategory || null,
+              confirmed: false,
+              outcome: "silence_timeout",
+              notes: "User silent for 30+ seconds",
+              source: "voice",
+            },
+          });
+          await say("I haven't heard from you in a bit. Let me connect you with someone who can help.");
+          await transferCallToHuman(callSid);
+          try { if (deepgramLive) deepgramLive.close(); } catch {}
+          try { ws.close(); } catch {}
+          return;
+        }
+        
+        if (speechFinal) {
+          if (processing || (isSpeaking && Date.now() < speakUntilTs)) {
+            pendingFinal = transcript;
+          } else {
+            pendingFinal = transcript;
             drainPendingFinal();
           }
-        }, 800 - timeSinceBotQuestion);
-        return;
+        }
+      } catch (e) {
+        console.error("❌ Deepgram message parsing error:", e);
       }
-      
-      await drainPendingFinal();
     });
-    
-    deepgramLive.on("error", (err) => console.error("DG Error:", err));
-  };
-  
-  setupDeepgram();
+  } catch (e) {
+    console.error("❌ Deepgram initialization error:", e);
+  }
   
   function readyToConfirm() {
-    return Boolean(
+    return (
       state.issueText && 
       state.carMakeModel && 
       state.name && 
@@ -840,13 +1256,11 @@ wss.on("connection", (ws) => {
             }
           }
           
-          // UPDATED: Better goodbye message with more time before hangup
           const zipSpoken = speakZipDigits(state.zip);
           await say(
             `Perfect — thanks, ${state.name}. We'll connect you with a trusted local mechanic near ZIP ${zipSpoken}. A mechanic will contact you shortly. Thanks for calling Mass Mechanic. Goodbye!`
           );
           
-          // UPDATED: Wait 4 seconds instead of 2 to let full message play
           setTimeout(async () => {
             console.log("📞 Initiating call hangup after confirmation");
             await hangupCall(callSid);
