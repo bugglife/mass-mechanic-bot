@@ -30,24 +30,19 @@ function looksLikeNo(text = "") {
   return /^(no|nope|not really|nah|wrong|incorrect)\b/i.test(text.trim());
 }
 
-// NEW: Preprocess text to replace "o" with "0" for number extraction
 function normalizeNumberText(text = "") {
-  // Replace letter O with zero when it appears in number contexts
-  // "oh" or "o" followed by digits or spaces between digits
   return String(text)
-    .replace(/\boh\b/gi, "0")  // "oh" -> "0"
-    .replace(/\bo\b/gi, "0");   // "o" -> "0"
+    .replace(/\boh\b/gi, "0")
+    .replace(/\bo\b/gi, "0");
 }
 
 function extractZip(text = "") {
-  // NEW: Normalize o/oh to 0 first
   const normalized = normalizeNumberText(text);
   const m = normalized.match(/\b(\d{5})(?:-\d{4})?\b/);
   return m ? m[1] : "";
 }
 
 function extractPhone(text = "") {
-  // NEW: Normalize o/oh to 0 first
   const normalized = normalizeNumberText(text);
   const digits = normalized.replace(/\D/g, "");
   
@@ -212,7 +207,6 @@ const FOLLOWUP_BY_CATEGORY = {
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Modified body parser to capture raw body for Facebook signature verification
 app.use(express.json({
   verify: (req, res, buf) => {
     req.rawBody = buf.toString();
@@ -294,8 +288,8 @@ app.post("/voice", (req, res) => {
 app.post("/transfer", (req, res) => {
   res.type("text/xml");
 
-  const OUTBOUND_CALLER_ID = "+16173153444"; // what calls you (must be a Twilio number on your account)
-  const ADMIN_DESTINATION  = "+16782003064"; // your admin phone
+  const OUTBOUND_CALLER_ID = "+16173153444";
+  const ADMIN_DESTINATION  = "+16782003064";
 
   return res.send(`
 <Response>
@@ -435,18 +429,9 @@ async function upsertCallOutcome({ callSid, patch }) {
   }
 }
 
-// UPDATED: More conservative priority logic
 function isHighPriorityLead(urgency, drivable) {
-  // High priority ONLY if:
-  // 1. Extremely urgent (ASAP, right now, immediately, stranded, emergency) OR
-  // 2. Not drivable (needs towing)
-  
   const isExtremelyUrgent = /(asap|right now|immediately|urgent|emergency|stranded|stuck|need help now|breaking down)/i.test(urgency || "");
   const notDrivable = /(no|not drivable|can't drive|cant drive|wont move|stuck|needs tow|need.*tow|stranded)/i.test(drivable || "");
-  
-  // "Today" alone is not enough for high priority - they need to say it's urgent/ASAP
-  // Being drivable + regular urgency = low priority (maintenance path)
-  
   return isExtremelyUrgent || notDrivable;
 }
 
@@ -548,10 +533,9 @@ function clearMessengerState(senderId) {
   messengerConversations.delete(senderId);
 }
 
-// Clean up stale conversations every 5 minutes
 setInterval(() => {
   const now = Date.now();
-  const timeout = 30 * 60 * 1000; // 30 minutes
+  const timeout = 30 * 60 * 1000;
   
   for (const [senderId, state] of messengerConversations.entries()) {
     if (now - state.lastActivity > timeout) {
@@ -869,7 +853,6 @@ app.get('/webhook/messenger', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
   
-  // DEBUG LOGGING
   console.log('🔍 Webhook verification attempt:');
   console.log('  Mode:', mode);
   console.log('  Token from request:', token);
@@ -914,7 +897,7 @@ app.post('/webhook/messenger', (req, res) => {
 });
 
 //────────────────────────────────────────────────────────────────────────────────
-// 9) WEBSOCKET SERVER (VOICE AGENT - ALL EXISTING CODE PRESERVED)
+// 9) WEBSOCKET SERVER (VOICE AGENT)
 //────────────────────────────────────────────────────────────────────────────────
 
 const server = app.listen(PORT, () => {
@@ -938,6 +921,7 @@ wss.on("connection", (ws) => {
   let pendingFinal = null;
   
   let deepgramLive = null;
+  let deepgramKeepaliveInterval = null; // ← NEW: keepalive interval reference
   let messages = [];
   
   const state = {
@@ -959,14 +943,53 @@ wss.on("connection", (ws) => {
     awaitingCorrectionChoice: false,
     correctingField: null,
   };
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // NEW: Helper to safely clear the keepalive interval
+  // ────────────────────────────────────────────────────────────────────────────
+  function clearDeepgramKeepalive() {
+    if (deepgramKeepaliveInterval) {
+      clearInterval(deepgramKeepaliveInterval);
+      deepgramKeepaliveInterval = null;
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // NEW: Start sending Deepgram KeepAlive pings every 8 seconds.
+  // Deepgram closes the connection after ~10-12s of silence/no audio.
+  // Sending {"type":"KeepAlive"} resets that timer on their end.
+  // ────────────────────────────────────────────────────────────────────────────
+  function startDeepgramKeepalive() {
+    clearDeepgramKeepalive(); // clear any existing interval first
+    deepgramKeepaliveInterval = setInterval(() => {
+      if (deepgramLive && deepgramLive.readyState === WebSocket.OPEN) {
+        deepgramLive.send(JSON.stringify({ type: "KeepAlive" }));
+        console.log("💓 Deepgram keepalive sent");
+      } else {
+        // Connection is gone — stop pinging
+        clearDeepgramKeepalive();
+      }
+    }, 8000);
+  }
   
   try {
     const dgUrl = `wss://api.deepgram.com/v1/listen?model=nova-2&language=en-US&smart_format=true&interim_results=true&utterance_end_ms=1500&endpointing=500`;
     deepgramLive = new WebSocket(dgUrl, { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } });
     
-    deepgramLive.on("open", () => console.log("🎙 Deepgram connected"));
-    deepgramLive.on("error", (err) => console.error("❌ Deepgram error:", err));
-    deepgramLive.on("close", () => console.log("🎙 Deepgram closed"));
+    deepgramLive.on("open", () => {
+      console.log("🎙 Deepgram connected");
+      startDeepgramKeepalive(); // ← NEW: start keepalive as soon as connected
+    });
+
+    deepgramLive.on("error", (err) => {
+      console.error("❌ Deepgram error:", err);
+      clearDeepgramKeepalive(); // ← NEW: stop keepalive on error
+    });
+
+    deepgramLive.on("close", () => {
+      console.log("🎙 Deepgram closed");
+      clearDeepgramKeepalive(); // ← NEW: stop keepalive on close
+    });
     
     deepgramLive.on("message", async (msg) => {
       try {
@@ -997,6 +1020,7 @@ wss.on("connection", (ws) => {
           });
           await say("I haven't heard from you in a bit. Let me connect you with someone who can help.");
           await transferCallToHuman(callSid);
+          clearDeepgramKeepalive(); // ← NEW
           try { if (deepgramLive) deepgramLive.close(); } catch {}
           try { ws.close(); } catch {}
           return;
@@ -1080,6 +1104,7 @@ wss.on("connection", (ws) => {
         });
         await say("Got it — connecting you to an operator now.");
         await transferCallToHuman(callSid);
+        clearDeepgramKeepalive(); // ← NEW
         try { if (deepgramLive) deepgramLive.close(); } catch {}
         try { ws.close(); } catch {}
         return;
@@ -1271,6 +1296,7 @@ wss.on("connection", (ws) => {
           setTimeout(async () => {
             console.log("📞 Initiating call hangup after confirmation");
             await hangupCall(callSid);
+            clearDeepgramKeepalive(); // ← NEW
             try { if (deepgramLive) deepgramLive.close(); } catch {}
             try { ws.close(); } catch {}
           }, 4000);
@@ -1459,12 +1485,14 @@ wss.on("connection", (ws) => {
         },
       });
       
+      clearDeepgramKeepalive(); // ← NEW
       try { if (deepgramLive) deepgramLive.close(); } catch {}
       return;
     }
   });
   
   ws.on("close", async () => {
+    clearDeepgramKeepalive(); // ← NEW
     try { if (deepgramLive) deepgramLive.close(); } catch {}
     
     await upsertCallOutcome({
