@@ -308,7 +308,7 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey, retries = 2 }
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
       const ttsResponse = await fetch(
-        "https://api.deepgram.com/v1/speak?model=aura-hera-en&encoding=mulaw&sample_rate=8000&container=none",
+        "https://api.deepgram.com/v1/speak?model=aura-perseus-en&encoding=mulaw&sample_rate=8000&container=none",
         {
           method: "POST",
           headers: { Authorization: `Token ${deepgramKey}`, "Content-Type": "application/json" },
