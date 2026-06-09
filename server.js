@@ -292,7 +292,9 @@ app.post("/hangup", (req, res) => {
 
 // Updated greeting — mirrors the QuoteForm's first question
 const VOICE_GREETING =
-  "Thanks for calling Mass Mechanic. We connect you with trusted local mechanics for fast, free repair quotes. Quick question first — are you having car trouble right now and need immediate help, or are you calling to schedule something ahead of time?";
+  "// In server.js, change VOICE_GREETING to:
+const VOICE_GREETING =
+  "Thanks for calling Mass Mechanic — free quotes from local mechanics. Are you having car trouble right now, or calling to schedule ahead?";
 
 //────────────────────────────────────────────────────────────────────────────────
 // 5) SPEAK + LOGGING HELPERS
