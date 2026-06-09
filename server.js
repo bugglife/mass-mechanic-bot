@@ -1,5 +1,4 @@
 // server.js
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
 import twilio from "twilio";
