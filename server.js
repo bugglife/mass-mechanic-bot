@@ -274,17 +274,16 @@ app.post("/voice", (req, res) => {
 app.post("/transfer", (req, res) => {
   res.type("text/xml");
   const OUTBOUND_CALLER_ID = "+15083009944";
-  const ADMIN_DESTINATION  = "+15088187698";
+  const ADMIN_DESTINATION = ADMIN_ESCALATION_PHONE || "+15088187698"; // fallback
+
   return res.send(`
 <Response>
   <Say>Connecting you now.</Say>
   <Dial callerId="${OUTBOUND_CALLER_ID}" timeout="25" answerOnBridge="true">
     ${ADMIN_DESTINATION}
   </Dial>
-  <Say>Sorry — nobody answered. Please text us and we will follow up.</Say>
-  <Hangup/>
-</Response>
-  `);
+  ...
+`);
 });
 
 app.post("/hangup", (req, res) => {
