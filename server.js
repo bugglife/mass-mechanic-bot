@@ -949,12 +949,16 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    if (data.event === "stop") {
-      await upsertCallOutcome({ callSid, patch: { caller_phone: state.phone || callerPhone, name: state.name || null, zip_code: state.zip || null, issue_text: state.issueText || null, issue_category: state.issueCategory || null, confirmed: !!state.confirmed, outcome: state.confirmed ? "completed" : transferred ? "transferred" : "ended_unconfirmed", notes: state.confirmed ? "Call completed" : "Call ended before confirmation", source: "voice" } });
-      clearDeepgramKeepalive();
-      try { if (deepgramLive) deepgramLive.close(); } catch {}
-      return;
-    }
+    if (data.event === "media") {
+  // ADD THIS:
+  if (deepgramLive?.readyState === WebSocket.OPEN && !isSpeaking) {
+    deepgramLive.send(Buffer.from(data.media.payload, "base64"));
+  } else if (!isSpeaking) {
+    // Log when media arrives but Deepgram isn't ready
+    console.log("⚠️ Media arrived but Deepgram not open. State:", deepgramLive?.readyState, "isSpeaking:", isSpeaking);
+  }
+  return;
+}
   });
 
   ws.on("close", async () => {
