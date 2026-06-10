@@ -31,9 +31,7 @@ function looksLikeNo(text = "") {
 }
 
 function normalizeNumberText(text = "") {
-  return String(text)
-    .replace(/\boh\b/gi, "0")
-    .replace(/\bo\b/gi, "0");
+  return String(text).replace(/\boh\b/gi, "0").replace(/\bo\b/gi, "0");
 }
 
 function extractZip(text = "") {
@@ -52,35 +50,20 @@ function extractPhone(text = "") {
 
 function extractName(text = "") {
   const original = String(text).trim();
-  if (/(leak|leaking|pull|pulling|brake|braking|start|starting|overheat|check|engine|noise|rattle|clunk|grind|grinding|squeal|shake|vibration|smoke|stall|idle|rough|slip|slipping|shift|puddle|under)/i.test(original)) {
-    return "";
-  }
-  const patterns = [
-    /(?:my name is|my name's|this is|i'm|im|i am|it'?s|call me|they call me)\s+([a-z]{2,}(?:\s+[a-z]+)?)\b/i,
-  ];
+  if (/(leak|leaking|pull|pulling|brake|braking|start|starting|overheat|check|engine|noise|rattle|clunk|grind|grinding|squeal|shake|vibration|smoke|stall|idle|rough|slip|slipping|shift|puddle|under)/i.test(original)) return "";
+  const patterns = [/(?:my name is|my name's|this is|i'm|im|i am|it'?s|call me|they call me)\s+([a-z]{2,}(?:\s+[a-z]+)?)\b/i];
   for (const pattern of patterns) {
     const m = original.match(pattern);
     if (m?.[1]) {
       const extracted = m[1].trim();
-      if (!/^(the|that|this|there|here|what|when|where|how|why|my|hi|hello|leak|leaking|pull|pulling)$/i.test(extracted)) {
-        return extracted;
-      }
+      if (!/^(the|that|this|there|here|what|when|where|how|why|my|hi|hello|leak|leaking|pull|pulling)$/i.test(extracted)) return extracted;
     }
   }
   const cleaned = original.replace(/[^a-zA-Z\s]/g, "").trim();
   const words = cleaned.split(/\s+/).filter((w) => w.length >= 2);
-  if (words.length === 1 && words[0].length >= 2 && words[0].length <= 15) {
-    const word = words[0];
-    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke|code|zip)$/i.test(word)) {
-      return word;
-    }
-  }
-  if (words.length === 2 && words[0].length >= 2 && words[0].length <= 15) {
-    const word = words[0];
-    if (!/^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke|code|zip)$/i.test(word)) {
-      return word;
-    }
-  }
+  const badWords = /^(the|that|this|there|here|what|when|where|how|why|yes|yeah|yep|nope|okay|sure|right|wrong|maybe|think|know|well|just|like|want|need|have|cant|don't|wont|hi|hello|hey|leak|leaking|pull|pulling|brake|start|engine|noise|grind|shake|smoke|code|zip)$/i;
+  if (words.length === 1 && words[0].length >= 2 && words[0].length <= 15 && !badWords.test(words[0])) return words[0];
+  if (words.length === 2 && words[0].length >= 2 && words[0].length <= 15 && !badWords.test(words[0])) return words[0];
   return "";
 }
 
@@ -173,13 +156,11 @@ const FOLLOWUP_BY_CATEGORY = {
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-app.use(express.json({
-  verify: (req, res, buf) => { req.rawBody = buf.toString(); }
-}));
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf.toString(); } }));
 app.use(express.urlencoded({ extended: true }));
 
 const {
-  ANTHROPIC_API_KEY,       // ← renamed from OPENAI / VITE_ANTHROPIC_API_KEY
+  ANTHROPIC_API_KEY,
   DEEPGRAM_API_KEY,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
@@ -198,15 +179,11 @@ if (!ANTHROPIC_API_KEY || !DEEPGRAM_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AU
   process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
-  auth: { persistSession: false },
-});
-
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false } });
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 //────────────────────────────────────────────────────────────────────────────────
 // 2) CLAUDE API HELPER
-// Single wrapper for all Claude calls — keeps the rest of the code clean.
 //────────────────────────────────────────────────────────────────────────────────
 
 async function callClaude({ system, messages, maxTokens = 120, model = "claude-haiku-4-5-20251001" }) {
@@ -217,19 +194,12 @@ async function callClaude({ system, messages, maxTokens = 120, model = "claude-h
       "anthropic-version": "2023-06-01",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      system,
-      messages,
-    }),
+    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages }),
   });
-
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
     throw new Error(`Claude API error ${response.status}: ${errText}`);
   }
-
   const json = await response.json();
   return json?.content?.[0]?.text?.trim() ?? "";
 }
@@ -266,23 +236,20 @@ app.post("/voice", (req, res) => {
       <Parameter name="callSid" value="${callSid}" />
     </Stream>
   </Connect>
-</Response>
-  `);
+</Response>`);
 });
 
 app.post("/transfer", (req, res) => {
   res.type("text/xml");
-  const OUTBOUND_CALLER_ID = "+15083009944";
-  const ADMIN_DESTINATION = ADMIN_ESCALATION_PHONE || "+15088187698"; // fallback
-
+  const OUTBOUND_CALLER_ID = "+16173153444";
+  const ADMIN_DESTINATION = ADMIN_ESCALATION_PHONE || "+16782003064";
   return res.send(`
 <Response>
   <Say>Connecting you now.</Say>
-  <Dial callerId="${OUTBOUND_CALLER_ID}" timeout="25" answerOnBridge="true">
-    ${ADMIN_DESTINATION}
-  </Dial>
-  ...
-`);
+  <Dial callerId="${OUTBOUND_CALLER_ID}" timeout="25" answerOnBridge="true">${ADMIN_DESTINATION}</Dial>
+  <Say>Sorry — nobody answered. Please text us and we will follow up.</Say>
+  <Hangup/>
+</Response>`);
 });
 
 app.post("/hangup", (req, res) => {
@@ -290,13 +257,10 @@ app.post("/hangup", (req, res) => {
   return res.send(`<Response><Hangup/></Response>`);
 });
 
-// Updated greeting — mirrors the QuoteForm's first question
-const VOICE_GREETING =
-  // In server.js, change VOICE_GREETING to:
-  "Thanks for calling Mass Mechanic — where you get free quotes from local mechanics. Are you having car trouble right now, or calling to schedule ahead?";
+const VOICE_GREETING = "Mass Mechanic — free quotes from local mechanics. Are you having car trouble right now, or calling to schedule ahead?";
 
 //────────────────────────────────────────────────────────────────────────────────
-// 5) SPEAK + LOGGING HELPERS
+// 5) SPEAK + CALL HELPERS
 //────────────────────────────────────────────────────────────────────────────────
 
 function estimateSpeakMs(text = "") {
@@ -309,7 +273,7 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey, retries = 2 }
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
       const ttsResponse = await fetch(
-        "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000&container=none",
+        "https://api.deepgram.com/v1/speak?model=aura-luna-en&encoding=mulaw&sample_rate=8000&container=none",
         {
           method: "POST",
           headers: { Authorization: `Token ${deepgramKey}`, "Content-Type": "application/json" },
@@ -341,7 +305,6 @@ async function speakOverStream({ ws, streamSid, text, deepgramKey, retries = 2 }
 }
 
 async function transferCallToHuman(callSid) {
-  if (!ADMIN_ESCALATION_PHONE) return console.error("❌ Missing ADMIN_ESCALATION_PHONE");
   if (!callSid) return console.error("❌ Missing callSid — cannot transfer");
   const baseUrl = PUBLIC_BASE_URL || "https://mass-mechanic-bot.onrender.com";
   await twilioClient.calls(callSid).update({ url: `${baseUrl}/transfer`, method: "POST" });
@@ -362,11 +325,7 @@ async function hangupCall(callSid) {
 async function upsertCallOutcome({ callSid, patch }) {
   if (!callSid) return;
   try {
-    const { data: existing } = await supabase
-      .from("call_outcomes")
-      .select("call_sid")
-      .eq("call_sid", callSid)
-      .maybeSingle();
+    const { data: existing } = await supabase.from("call_outcomes").select("call_sid").eq("call_sid", callSid).maybeSingle();
     if (existing) {
       const { error } = await supabase.from("call_outcomes").update(patch).eq("call_sid", callSid);
       if (error) console.error("⚠️ call_outcomes update failed:", error.message);
@@ -375,7 +334,7 @@ async function upsertCallOutcome({ callSid, patch }) {
       if (error) console.error("⚠️ call_outcomes insert failed:", error.message);
     }
   } catch (e) {
-    console.error("⚠️ call_outcomes operation exception:", e);
+    console.error("⚠️ call_outcomes exception:", e);
   }
 }
 
@@ -387,12 +346,9 @@ function isHighPriorityLead(urgency, drivable) {
 
 async function createLeadFromCall({ callerPhone, state }) {
   try {
-    // Build description with quote preference tag (mirrors QuoteForm behavior)
-    const descriptionTag =
-      state.quotePreference === "quotes"
-        ? " [PREFERENCE: Get quotes from 2-3 mechanics]"
-        : " [PREFERENCE: Connect with first available fast]";
-
+    const descriptionTag = state.quotePreference === "quotes"
+      ? " [PREFERENCE: Get quotes from 2-3 mechanics]"
+      : " [PREFERENCE: Connect with first available fast]";
     const payload = {
       service_type: serviceTypeFromCategory(state.issueCategory),
       zip_code: state.zip,
@@ -407,36 +363,28 @@ async function createLeadFromCall({ callerPhone, state }) {
       lead_category: "repair",
       drivable: state.drivable || null,
       urgency_window: state.urgency_window || null,
-      pickup_address: state.pickupAddress || null,   // ← NEW
-      contact_preference: state.contactMethod || null, // ← NEW
+      pickup_address: state.pickupAddress || null,
+      contact_preference: state.contactMethod || null,
     };
-
     const { data, error } = await supabase.from("leads").insert(payload).select("id, lead_code").maybeSingle();
     if (error) { console.error("❌ Lead insert failed:", error.message); return { ok: false, lead: null }; }
     if (!data) { console.error("❌ Lead insert returned no data"); return { ok: false, lead: null }; }
-
     console.log(`✅ Lead created: ${data.id} / ${data.lead_code}`);
-
     const priority = isHighPriorityLead(state.urgency_window, state.drivable);
     const dispatchUrl = priority
       ? `${SUPABASE_URL}/functions/v1/send-lead-to-mechanics`
       : `${SUPABASE_URL}/functions/v1/send-maintenance-lead-to-mechanics`;
-
-    console.log(`📮 Dispatching ${priority ? "REPAIR" : "MAINTENANCE"} lead:`, data.id);
-
     const dispatchRes = await fetch(dispatchUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${SUPABASE_KEY}` },
       body: JSON.stringify({ leadId: data.id }),
     });
-
     if (!dispatchRes.ok) {
       const errText = await dispatchRes.text().catch(() => "");
       console.error(`❌ Dispatch failed (${dispatchRes.status}):`, errText);
-      return { ok: true, lead: data };
+    } else {
+      console.log("✅ Dispatch response:", await dispatchRes.json());
     }
-
-    console.log("✅ Dispatch response:", await dispatchRes.json());
     return { ok: true, lead: data };
   } catch (err) {
     console.error("❌ createLeadFromCall exception:", err);
@@ -445,7 +393,7 @@ async function createLeadFromCall({ callerPhone, state }) {
 }
 
 //────────────────────────────────────────────────────────────────────────────────
-// 6) MESSENGER CONVERSATION STATE
+// 6) MESSENGER STATE
 //────────────────────────────────────────────────────────────────────────────────
 
 const messengerConversations = new Map();
@@ -462,26 +410,22 @@ function updateMessengerState(senderId, updates) {
   messengerConversations.set(senderId, { ...state, ...updates, lastActivity: Date.now() });
 }
 
-function clearMessengerState(senderId) {
-  messengerConversations.delete(senderId);
-}
+function clearMessengerState(senderId) { messengerConversations.delete(senderId); }
 
 setInterval(() => {
   const now = Date.now();
-  const timeout = 30 * 60 * 1000;
-  for (const [senderId, state] of messengerConversations.entries()) {
-    if (now - state.lastActivity > timeout) messengerConversations.delete(senderId);
+  for (const [id, s] of messengerConversations.entries()) {
+    if (now - s.lastActivity > 30 * 60 * 1000) messengerConversations.delete(id);
   }
 }, 5 * 60 * 1000);
 
 //────────────────────────────────────────────────────────────────────────────────
-// 7) MESSENGER HELPER FUNCTIONS
+// 7) MESSENGER HELPERS
 //────────────────────────────────────────────────────────────────────────────────
 
 function verifyRequestSignature(rawBody, signature) {
   if (!signature) return false;
-  const elements = signature.split("=");
-  const signatureHash = elements[1];
+  const signatureHash = signature.split("=")[1];
   const expectedHash = crypto.createHmac("sha256", FACEBOOK_APP_SECRET).update(rawBody).digest("hex");
   return signatureHash === expectedHash;
 }
@@ -495,32 +439,22 @@ async function sendMessengerMessage(recipientId, message) {
       body: JSON.stringify({ recipient: { id: recipientId }, message }),
     });
     if (!response.ok) console.error("Messenger API Error:", await response.json());
-  } catch (error) {
-    console.error("Failed to send message:", error);
-  }
+  } catch (error) { console.error("Failed to send message:", error); }
 }
 
 async function sendQuickReplies(recipientId, text, replies) {
   await sendMessengerMessage(recipientId, {
     text,
-    quick_replies: replies.map((reply) => ({
-      content_type: "text",
-      title: reply,
-      payload: reply.toUpperCase(),
-    })),
+    quick_replies: replies.map((r) => ({ content_type: "text", title: r, payload: r.toUpperCase() })),
   });
 }
 
 async function getMessengerUserProfile(senderId) {
   try {
     const url = `https://graph.facebook.com/v18.0/${senderId}?fields=first_name,last_name&access_token=${FACEBOOK_PAGE_ACCESS_TOKEN}`;
-    const response = await fetch(url);
-    const data = await response.json();
+    const data = await (await fetch(url)).json();
     return { name: `${data.first_name} ${data.last_name}` };
-  } catch (error) {
-    console.error("Failed to get user profile:", error);
-    return null;
-  }
+  } catch { return null; }
 }
 
 function extractPhoneNumberMessenger(text) {
@@ -530,31 +464,22 @@ function extractPhoneNumberMessenger(text) {
   return null;
 }
 
-// ── Messenger issue analysis now uses Claude instead of GPT ──
 async function analyzeMessengerIssue(text) {
   try {
     const raw = await callClaude({
-      model: "claude-haiku-4-5-20251001",
       maxTokens: 100,
-      system:
-        'Extract car issue category from the user message. Categories: brakes, engine, no-start, overheating, transmission, electrical, other. ' +
-        'Respond ONLY with valid JSON — no preamble, no markdown: {"hasIssue": boolean, "category": string}',
+      system: 'Extract car issue category. Categories: brakes, engine, no-start, overheating, transmission, electrical, other. Respond ONLY with valid JSON, no preamble: {"hasIssue": boolean, "category": string}',
       messages: [{ role: "user", content: text }],
     });
-
-    // Strip any accidental markdown fences before parsing
-    const clean = raw.replace(/```json|```/g, "").trim();
-    return JSON.parse(clean);
-  } catch (error) {
-    console.error("Error analyzing issue with Claude:", error);
-    // Regex fallback
-    const lowerText = text.toLowerCase();
+    return JSON.parse(raw.replace(/```json|```/g, "").trim());
+  } catch {
+    const t = text.toLowerCase();
     let category = "other";
-    if (lowerText.includes("brake")) category = "brakes";
-    else if (lowerText.includes("engine") || lowerText.includes("start")) category = "engine";
-    else if (lowerText.includes("transmission")) category = "transmission";
-    else if (lowerText.includes("overheat") || lowerText.includes("temperature")) category = "overheating";
-    else if (lowerText.includes("electrical") || lowerText.includes("battery")) category = "electrical";
+    if (t.includes("brake")) category = "brakes";
+    else if (t.includes("engine") || t.includes("start")) category = "engine";
+    else if (t.includes("transmission")) category = "transmission";
+    else if (t.includes("overheat") || t.includes("temperature")) category = "overheating";
+    else if (t.includes("electrical") || t.includes("battery")) category = "electrical";
     return { hasIssue: text.length > 10, category };
   }
 }
@@ -574,45 +499,32 @@ async function handleInitialMessengerMessage(senderId, text, state) {
 }
 
 async function handleLocationResponse(senderId, text, state) {
-  const location = text.toLowerCase();
+  const loc = text.toLowerCase();
   let city;
-  if (location.includes("brockton")) city = "Brockton";
-  else if (location.includes("fall river")) city = "Fall River";
-  else if (location.includes("new bedford")) city = "New Bedford";
-  else {
-    await sendQuickReplies(senderId, "I didn't catch that. Which area are you in?", ["Brockton", "Fall River", "New Bedford"]);
-    return;
-  }
+  if (loc.includes("brockton")) city = "Brockton";
+  else if (loc.includes("fall river")) city = "Fall River";
+  else if (loc.includes("new bedford")) city = "New Bedford";
+  else { await sendQuickReplies(senderId, "I didn't catch that. Which area are you in?", ["Brockton", "Fall River", "New Bedford"]); return; }
   updateMessengerState(senderId, { step: "awaiting_phone", data: { ...state.data, location: city } });
   await sendMessengerMessage(senderId, { text: "Perfect! What's the best phone number to reach you? (Mechanics will text/call you with quotes)" });
 }
 
 async function handlePhoneResponse(senderId, text, state) {
   const phone = extractPhoneNumberMessenger(text);
-  if (!phone) {
-    await sendMessengerMessage(senderId, { text: "I need a valid phone number so mechanics can reach you. Please try again:" });
-    return;
-  }
+  if (!phone) { await sendMessengerMessage(senderId, { text: "I need a valid phone number so mechanics can reach you. Please try again:" }); return; }
   updateMessengerState(senderId, { step: "awaiting_confirmation", data: { ...state.data, phone } });
   await sendMessengerMessage(senderId, {
-    text:
-      `Great! Here's what I have:\n\n` +
-      `🔧 Issue: ${state.data.issue}\n` +
-      `📍 Area: ${state.data.location}\n` +
-      `📱 Phone: ${phone}\n\n` +
-      `Reply "YES" to submit, or "CHANGE" to start over.`,
+    text: `Great! Here's what I have:\n\n🔧 Issue: ${state.data.issue}\n📍 Area: ${state.data.location}\n📱 Phone: ${phone}\n\nReply "YES" to submit, or "CHANGE" to start over.`,
   });
 }
 
 async function handleConfirmation(senderId, text, state) {
-  const response = text.toLowerCase();
-  if (response.includes("yes") || response.includes("confirm") || response.includes("correct")) {
+  const r = text.toLowerCase();
+  if (r.includes("yes") || r.includes("confirm") || r.includes("correct")) {
     await createLeadFromMessenger(senderId, state.data);
-    await sendMessengerMessage(senderId, {
-      text: `✅ Got it! We're connecting you with local mechanics now. You'll receive quotes via text at ${state.data.phone} within the next hour.`,
-    });
+    await sendMessengerMessage(senderId, { text: `✅ Got it! We're connecting you with local mechanics now. You'll receive quotes via text at ${state.data.phone} within the next hour.` });
     clearMessengerState(senderId);
-  } else if (response.includes("change") || response.includes("start over")) {
+  } else if (r.includes("change") || r.includes("start over")) {
     clearMessengerState(senderId);
     await sendMessengerMessage(senderId, { text: "No problem! What's going on with your car?" });
   } else {
@@ -623,27 +535,21 @@ async function handleConfirmation(senderId, text, state) {
 async function createLeadFromMessenger(senderId, data) {
   try {
     const userProfile = await getMessengerUserProfile(senderId);
-    const { data: lead, error } = await supabase
-      .from("leads")
-      .insert({
-        service_type: serviceTypeFromCategory(data.category),
-        zip_code: extractZip(data.location) || null,
-        car_make_model: "Unknown",
-        description: data.issue,
-        name: userProfile?.name || "Messenger User",
-        phone: data.phone,
-        email: "",
-        lead_source: "messenger",
-        status: "new",
-        lead_category: "repair",
-        facebook_psid: senderId,
-      })
-      .select("id, lead_code")
-      .single();
-
+    const { data: lead, error } = await supabase.from("leads").insert({
+      service_type: serviceTypeFromCategory(data.category),
+      zip_code: extractZip(data.location) || null,
+      car_make_model: "Unknown",
+      description: data.issue,
+      name: userProfile?.name || "Messenger User",
+      phone: data.phone,
+      email: "",
+      lead_source: "messenger",
+      status: "new",
+      lead_category: "repair",
+      facebook_psid: senderId,
+    }).select("id, lead_code").single();
     if (error) throw error;
     console.log(`✅ Messenger lead created: ${lead.id}`);
-
     await fetch(`${SUPABASE_URL}/functions/v1/send-lead-to-mechanics`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${SUPABASE_KEY}` },
@@ -651,18 +557,13 @@ async function createLeadFromMessenger(senderId, data) {
     });
   } catch (error) {
     console.error("Failed to create Messenger lead:", error);
-    await sendMessengerMessage(senderId, {
-      text: "Sorry, something went wrong. Please call us at 617-315-3444 or visit massmechanic.com",
-    });
+    await sendMessengerMessage(senderId, { text: "Sorry, something went wrong. Please call us at 617-315-3444 or visit massmechanic.com" });
   }
 }
 
 async function handleMessengerMessage(senderId, message) {
   const text = message.text?.trim();
-  if (!text) {
-    await sendMessengerMessage(senderId, { text: "I see you sent a photo! To get the fastest quote, please describe what's wrong with your car." });
-    return;
-  }
+  if (!text) { await sendMessengerMessage(senderId, { text: "I see you sent a photo! To get the fastest quote, please describe what's wrong with your car." }); return; }
   const state = getMessengerState(senderId);
   switch (state.step) {
     case "initial": await handleInitialMessengerMessage(senderId, text, state); break;
@@ -673,9 +574,7 @@ async function handleMessengerMessage(senderId, message) {
   }
 }
 
-function handleMessengerPostback(senderId, postback) {
-  console.log("Postback received:", postback);
-}
+function handleMessengerPostback(senderId, postback) { console.log("Postback received:", postback); }
 
 //────────────────────────────────────────────────────────────────────────────────
 // 9) MESSENGER WEBHOOK ENDPOINTS
@@ -685,34 +584,24 @@ app.get("/webhook/messenger", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === FACEBOOK_VERIFY_TOKEN) {
-    console.log("✅ Webhook verified");
-    res.status(200).send(challenge);
-  } else {
-    console.log("❌ Webhook verification failed");
-    res.sendStatus(403);
-  }
+  if (mode === "subscribe" && token === FACEBOOK_VERIFY_TOKEN) { console.log("✅ Webhook verified"); res.status(200).send(challenge); }
+  else { console.log("❌ Webhook verification failed"); res.sendStatus(403); }
 });
 
 app.post("/webhook/messenger", (req, res) => {
   const body = req.body;
   const signature = req.headers["x-hub-signature-256"];
-  if (!verifyRequestSignature(req.rawBody || JSON.stringify(body), signature)) {
-    console.log("❌ Invalid signature");
-    return res.sendStatus(403);
-  }
+  if (!verifyRequestSignature(req.rawBody || JSON.stringify(body), signature)) { console.log("❌ Invalid signature"); return res.sendStatus(403); }
   if (body.object === "page") {
     res.status(200).send("EVENT_RECEIVED");
     body.entry.forEach((entry) => {
-      entry.messaging.forEach((webhookEvent) => {
-        const senderId = webhookEvent.sender.id;
-        if (webhookEvent.message) handleMessengerMessage(senderId, webhookEvent.message);
-        else if (webhookEvent.postback) handleMessengerPostback(senderId, webhookEvent.postback);
+      entry.messaging.forEach((evt) => {
+        const senderId = evt.sender.id;
+        if (evt.message) handleMessengerMessage(senderId, evt.message);
+        else if (evt.postback) handleMessengerPostback(senderId, evt.postback);
       });
     });
-  } else {
-    res.sendStatus(404);
-  }
+  } else { res.sendStatus(404); }
 });
 
 //────────────────────────────────────────────────────────────────────────────────
@@ -740,12 +629,11 @@ wss.on("connection", (ws) => {
   let pendingFinal = null;
   let deepgramLive = null;
   let deepgramKeepaliveInterval = null;
-  let messages = []; // conversation history for Claude fallback
+  let messages = [];
 
-  // ── State object — updated to match current QuoteForm fields ──
   const state = {
-    currentStep: "urgency_type",   // first question mirrors the form
-    urgencyType: "",               // "emergency" | "scheduled"
+    currentStep: "urgency_type",
+    urgencyType: "",
     issueText: "",
     issueCategory: "general",
     askedFollowup: false,
@@ -756,10 +644,10 @@ wss.on("connection", (ws) => {
     zip: "",
     phone: "",
     urgency_window: "",
-    quotePreference: "",           // "fast" | "quotes"   ← NEW (matches form)
+    quotePreference: "",
     drivable: "",
-    pickupAddress: "",             // ← NEW (when drivable = No)
-    contactMethod: "",             // ← NEW (phone/text/email)
+    pickupAddress: "",
+    contactMethod: "",
     confirmed: false,
     leadCreated: false,
     awaitingConfirmation: false,
@@ -768,10 +656,7 @@ wss.on("connection", (ws) => {
   };
 
   function clearDeepgramKeepalive() {
-    if (deepgramKeepaliveInterval) {
-      clearInterval(deepgramKeepaliveInterval);
-      deepgramKeepaliveInterval = null;
-    }
+    if (deepgramKeepaliveInterval) { clearInterval(deepgramKeepaliveInterval); deepgramKeepaliveInterval = null; }
   }
 
   function startDeepgramKeepalive() {
@@ -786,13 +671,19 @@ wss.on("connection", (ws) => {
     }, 8000);
   }
 
-  // ── Deepgram connection ──
-  try {
-    const dgUrl = `wss://api.deepgram.com/v1/listen?model=nova-2&language=en-US&smart_format=true&interim_results=true&utterance_end_ms=1500&endpointing=500`;
+  // ── KEY FIX: Open Deepgram on demand, not at connection time ──
+  // Deepgram was timing out during the bot greeting because it received
+  // no audio while TTS was playing. Now we open it fresh after each
+  // bot utterance so it's always ready exactly when the caller speaks.
+  function openDeepgram() {
+    if (deepgramLive && deepgramLive.readyState === WebSocket.OPEN) return;
+    clearDeepgramKeepalive();
+
+    const dgUrl = "wss://api.deepgram.com/v1/listen?model=nova-2&language=en-US&smart_format=true&interim_results=true&utterance_end_ms=1500&endpointing=500";
     deepgramLive = new WebSocket(dgUrl, { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } });
 
     deepgramLive.on("open", () => {
-      console.log("🎙 Deepgram connected");
+      console.log("🎙 Deepgram opened");
       startDeepgramKeepalive();
     });
 
@@ -817,10 +708,10 @@ wss.on("connection", (ws) => {
         if (silentTooLong && !transferred && !state.confirmed) {
           transferred = true;
           await upsertCallOutcome({ callSid, patch: { caller_phone: callerPhone, name: state.name || null, zip_code: state.zip || null, issue_text: state.issueText || null, issue_category: state.issueCategory || null, confirmed: false, outcome: "silence_timeout", notes: "User silent for 30+ seconds", source: "voice" } });
-          await say("I haven't heard from you in a bit. Let me connect you with someone who can help.");
+          await say("I haven't heard from you in a bit. Let me connect you with someone.");
           await transferCallToHuman(callSid);
           clearDeepgramKeepalive();
-          try { if (deepgramLive) deepgramLive.close(); } catch {}
+          try { deepgramLive.close(); } catch {}
           try { ws.close(); } catch {}
           return;
         }
@@ -837,8 +728,6 @@ wss.on("connection", (ws) => {
         console.error("❌ Deepgram message parsing error:", e);
       }
     });
-  } catch (e) {
-    console.error("❌ Deepgram initialization error:", e);
   }
 
   function readyToConfirm() {
@@ -850,33 +739,44 @@ wss.on("connection", (ws) => {
       state.phone &&
       state.urgency_window &&
       state.drivable &&
-      // If not drivable, pickup address is also required
       (state.drivable.toLowerCase() !== "no" || state.pickupAddress)
     );
   }
 
+  // ── say(): close Deepgram while speaking, reopen when done ──
   async function say(text) {
     if (!ws || ws.readyState !== WebSocket.OPEN || !streamSid) return;
     console.log(`🤖 Bot: ${text}`);
+
+    // Close Deepgram while bot speaks — caller audio is muted anyway
+    clearDeepgramKeepalive();
+    if (deepgramLive) { try { deepgramLive.close(); } catch {} deepgramLive = null; }
+
     isSpeaking = true;
     const ms = estimateSpeakMs(text);
     speakUntilTs = Date.now() + ms;
     lastBotQuestionAt = Date.now();
+
     const ok = await speakOverStream({ ws, streamSid, text, deepgramKey: DEEPGRAM_API_KEY });
     if (!ok) { speakUntilTs = Date.now() + 500; console.error("❌ TTS completely failed after retries"); }
-    setTimeout(() => { isSpeaking = false; }, ms + 500);
+
+    // Reopen Deepgram fresh after bot finishes speaking
+    setTimeout(() => {
+      isSpeaking = false;
+      console.log("🎙 Reopening Deepgram to listen...");
+      openDeepgram();
+    }, ms + 300);
   }
 
   async function drainPendingFinal() {
     if (!pendingFinal) return;
     processing = true;
-
     try {
       const text = pendingFinal;
       pendingFinal = null;
       console.log(`🗣 User: ${text}`);
 
-      // ── Human transfer request (always checked first) ──
+      // Human transfer — always first
       if (wantsHumanFromText(text)) {
         transferred = true;
         await upsertCallOutcome({ callSid, patch: { caller_phone: callerPhone, name: state.name || null, zip_code: state.zip || null, issue_text: state.issueText || null, issue_category: state.issueCategory || null, confirmed: false, outcome: "transfer_requested", notes: "User requested a human", source: "voice" } });
@@ -888,32 +788,25 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // ── STEP 0: Emergency vs Scheduled (mirrors QuoteForm first question) ──
+      // Step 0: Emergency vs Scheduled
       if (!state.urgencyType) {
         const isEmergency = /(right now|immediate|emergency|help now|stranded|broke down|won't start|wont start|can't drive|cant drive|stuck|urgent|asap|today|happening now)/i.test(text);
         const isScheduled = /(schedule|scheduled|ahead|plan|planning|later|next week|this week|appointment|not urgent|no rush|in a few)/i.test(text);
-
         if (isEmergency || looksLikeYes(text)) {
-          state.urgencyType = "emergency";
-          state.urgency_window = "Today";
-          state.currentStep = "issue";
-          await say("Got it — let's get you help fast. What's going on with your car?");
-          return;
+          state.urgencyType = "emergency"; state.urgency_window = "Today"; state.currentStep = "issue";
+          await say("Got it — let's get you help fast. What's going on with your car?"); return;
         } else if (isScheduled || looksLikeNo(text)) {
-          state.urgencyType = "scheduled";
-          state.currentStep = "issue";
-          await say("No problem. Tell me what's going on with your car and we'll find you the best local mechanic.");
-          return;
+          state.urgencyType = "scheduled"; state.currentStep = "issue";
+          await say("No problem. Tell me what's going on with your car and we'll find you the best local mechanic."); return;
         } else {
-          await say("Are you having an emergency right now and need immediate help, or are you calling to schedule ahead?");
-          return;
+          await say("Are you having an emergency right now, or calling to schedule ahead?"); return;
         }
       }
 
-      // ── Correction choice handler ──
+      // Correction choice handler
       if (state.awaitingCorrectionChoice) {
         const lower = text.toLowerCase();
-        if (/(zip|zip code|zipcode)/i.test(lower)) { state.correctingField = "zip"; state.zip = ""; state.currentStep = "zip"; state.awaitingCorrectionChoice = false; await say("Okay, what's your 5-digit ZIP code?"); return; }
+        if (/(zip|zip code)/i.test(lower)) { state.correctingField = "zip"; state.zip = ""; state.currentStep = "zip"; state.awaitingCorrectionChoice = false; await say("Okay, what's your 5-digit ZIP code?"); return; }
         if (/(name|first name)/i.test(lower)) { state.correctingField = "name"; state.name = ""; state.currentStep = "name"; state.awaitingCorrectionChoice = false; await say("Okay, what's your first name?"); return; }
         if (/(car|vehicle|make|model)/i.test(lower)) { state.correctingField = "car"; state.carMakeModel = ""; state.carYear = ""; state.currentStep = "car"; state.awaitingCorrectionChoice = false; await say("Okay, what's the make and model of your car?"); return; }
         if (/(issue|problem|wrong)/i.test(lower)) { state.correctingField = "issue"; state.issueText = ""; state.currentStep = "issue"; state.awaitingCorrectionChoice = false; await say("Okay, tell me what's wrong with your car."); return; }
@@ -921,107 +814,51 @@ wss.on("connection", (ws) => {
         if (/(urgency|when|time)/i.test(lower)) { state.correctingField = "urgency"; state.urgency_window = ""; state.currentStep = "urgency"; state.awaitingCorrectionChoice = false; await say("Okay, when do you need the repair done?"); return; }
         if (/(drivable|drive|driving)/i.test(lower)) { state.correctingField = "drivable"; state.drivable = ""; state.currentStep = "drivable"; state.awaitingCorrectionChoice = false; await say("Okay, can you drive the car, or does it need to be towed?"); return; }
         if (/(address|pickup|location|where)/i.test(lower)) { state.correctingField = "pickup_address"; state.pickupAddress = ""; state.currentStep = "pickup_address"; state.awaitingCorrectionChoice = false; await say("Okay, what's the address where the car is located?"); return; }
-        await say("Sorry, I didn't catch that. What would you like to correct?");
-        return;
+        await say("Sorry, I didn't catch that. What would you like to correct?"); return;
       }
 
-      // ── Followup response ──
+      // Followup response
       if (state.awaitingFollowupResponse) {
-        if (text.length > 3) {
-          state.issueText = `${state.issueText}. ${text}`;
-          state.awaitingFollowupResponse = false;
-          state.currentStep = "car";
-          console.log(`✅ Added followup details: ${text}`);
-        }
+        if (text.length > 3) { state.issueText = `${state.issueText}. ${text}`; state.awaitingFollowupResponse = false; state.currentStep = "car"; }
       }
 
-      // ── Field extraction ──
-      if (state.currentStep === "zip" && !state.zip) {
-        const z = extractZip(text);
-        if (z) { state.zip = z; state.correctingField = null; console.log(`✅ Extracted ZIP: ${z}`); }
-      }
-
-      if (state.currentStep === "phone" && !state.phone) {
-        const p = extractPhone(text);
-        if (p) { state.phone = p; state.correctingField = null; console.log(`✅ Extracted phone: ${p}`); }
-      }
-
-      if (state.currentStep === "name" && !state.name) {
-        const n = extractName(text);
-        if (n) { state.name = n; state.correctingField = null; console.log(`✅ Extracted name: ${n}`); }
-      }
-
+      // Field extraction
+      if (state.currentStep === "zip" && !state.zip) { const z = extractZip(text); if (z) { state.zip = z; state.correctingField = null; console.log(`✅ ZIP: ${z}`); } }
+      if (state.currentStep === "phone" && !state.phone) { const p = extractPhone(text); if (p) { state.phone = p; state.correctingField = null; console.log(`✅ Phone: ${p}`); } }
+      if (state.currentStep === "name" && !state.name) { const n = extractName(text); if (n) { state.name = n; state.correctingField = null; console.log(`✅ Name: ${n}`); } }
       if (state.currentStep === "car") {
-        if (!state.carYear) { const y = extractCarYear(text); if (y) { state.carYear = y; console.log(`✅ Extracted year: ${y}`); } }
-        if (!state.carMakeModel) { const mm = extractCarMakeModel(text); if (mm) { state.carMakeModel = mm; state.correctingField = null; console.log(`✅ Extracted car: ${mm}`); } }
+        if (!state.carYear) { const y = extractCarYear(text); if (y) { state.carYear = y; console.log(`✅ Year: ${y}`); } }
+        if (!state.carMakeModel) { const mm = extractCarMakeModel(text); if (mm) { state.carMakeModel = mm; state.correctingField = null; console.log(`✅ Car: ${mm}`); } }
       }
-
       if (state.currentStep === "issue" && !state.issueText) {
-        const z = extractZip(text);
-        const n = extractName(text);
-        if (!z && !n && text.length > 6) {
-          state.issueText = text;
-          state.issueCategory = categorizeIssue(text);
-          state.correctingField = null;
-          console.log(`✅ Captured issue: ${text} (category: ${state.issueCategory})`);
+        if (!extractZip(text) && !extractName(text) && text.length > 6) {
+          state.issueText = text; state.issueCategory = categorizeIssue(text); state.correctingField = null; console.log(`✅ Issue: ${text}`);
         }
       }
-
-      if (state.currentStep === "urgency" && !state.urgency_window) {
-        state.urgency_window = text;
-        state.correctingField = null;
-        console.log(`✅ Captured urgency: ${text}`);
-      }
-
-      if (state.currentStep === "drivable" && !state.drivable) {
-        state.drivable = text;
-        state.correctingField = null;
-        console.log(`✅ Captured drivability: ${text}`);
-      }
-
-      // ── NEW: Pickup address (when not drivable) ──
-      if (state.currentStep === "pickup_address" && !state.pickupAddress) {
-        if (text.length > 5) {
-          state.pickupAddress = text;
-          state.correctingField = null;
-          console.log(`✅ Captured pickup address: ${text}`);
-        }
-      }
-
-      // ── NEW: Quote preference ──
+      if (state.currentStep === "urgency" && !state.urgency_window) { state.urgency_window = text; state.correctingField = null; console.log(`✅ Urgency: ${text}`); }
+      if (state.currentStep === "drivable" && !state.drivable) { state.drivable = text; state.correctingField = null; console.log(`✅ Drivable: ${text}`); }
+      if (state.currentStep === "pickup_address" && !state.pickupAddress && text.length > 5) { state.pickupAddress = text; state.correctingField = null; console.log(`✅ Pickup: ${text}`); }
       if (state.currentStep === "quote_preference" && !state.quotePreference) {
-        const wantsFast = /(fast|first|available|quick|asap|now|immediately|connect|whoever)/i.test(text);
         const wantsQuotes = /(quote|quotes|compare|multiple|two|three|2|3|options|best price|shop around)/i.test(text);
-        state.quotePreference = wantsQuotes ? "quotes" : "fast";
-        state.correctingField = null;
-        console.log(`✅ Quote preference: ${state.quotePreference}`);
+        state.quotePreference = wantsQuotes ? "quotes" : "fast"; state.correctingField = null; console.log(`✅ Quote pref: ${state.quotePreference}`);
       }
-
-      // ── NEW: Contact method preference ──
       if (state.currentStep === "contact_method" && !state.contactMethod) {
         const wantsPhone = /(phone|call|calling)/i.test(text);
         const wantsEmail = /(email|mail)/i.test(text);
-        state.contactMethod = wantsPhone ? "phone" : wantsEmail ? "email" : "text";
-        state.correctingField = null;
-        console.log(`✅ Contact method: ${state.contactMethod}`);
+        state.contactMethod = wantsPhone ? "phone" : wantsEmail ? "email" : "text"; state.correctingField = null; console.log(`✅ Contact: ${state.contactMethod}`);
       }
 
-      // ── Confirmation handler ──
+      // Confirmation handler
       if (state.awaitingConfirmation && !state.confirmed) {
         if (looksLikeYes(text)) {
-          state.confirmed = true;
-          state.awaitingConfirmation = false;
-
+          state.confirmed = true; state.awaitingConfirmation = false;
           await upsertCallOutcome({ callSid, patch: { caller_phone: state.phone || callerPhone, name: state.name || null, zip_code: state.zip || null, issue_text: state.issueText || null, issue_category: state.issueCategory || null, confirmed: true, outcome: "confirmed", notes: "Confirmed details on call", source: "voice" } });
-
           if (!state.leadCreated) {
             const leadRes = await createLeadFromCall({ callerPhone, state });
-            if (leadRes.ok) { state.leadCreated = true; console.log("✅ Lead created from voice:", leadRes.lead); }
+            if (leadRes.ok) { state.leadCreated = true; console.log("✅ Lead created:", leadRes.lead); }
           }
-
           const zipSpoken = speakZipDigits(state.zip);
           await say(`Perfect — thanks, ${state.name}. We'll connect you with a trusted local mechanic near ZIP ${zipSpoken}. A mechanic will contact you shortly. Thanks for calling Mass Mechanic. Goodbye!`);
-
           setTimeout(async () => {
             await hangupCall(callSid);
             clearDeepgramKeepalive();
@@ -1030,144 +867,60 @@ wss.on("connection", (ws) => {
           }, 4000);
           return;
         }
-
         if (looksLikeNo(text)) {
-          state.awaitingConfirmation = false;
-          state.awaitingCorrectionChoice = true;
-          await say("No problem — what should I correct? You can say zip, name, car, issue, phone, urgency, drivable, or address.");
-          return;
+          state.awaitingConfirmation = false; state.awaitingCorrectionChoice = true;
+          await say("No problem — what should I correct? You can say zip, name, car, issue, phone, urgency, drivable, or address."); return;
         }
-
-        await say("Sorry, I didn't catch that. Is that information correct?");
-        return;
+        await say("Sorry, I didn't catch that. Is that information correct?"); return;
       }
 
-      // ──────────────────────────────────────────────────────────────────────
-      // CONVERSATION FLOW — mirrors QuoteForm field order
-      // ──────────────────────────────────────────────────────────────────────
-
-      if (!state.issueText) {
-        state.currentStep = "issue";
-        await say("Tell me what's going on with your car.");
-        return;
+      // ── Conversation flow ──
+      if (!state.issueText) { state.currentStep = "issue"; await say("Tell me what's going on with your car."); return; }
+      if (!state.askedFollowup) {
+        state.askedFollowup = true; state.awaitingFollowupResponse = true; state.currentStep = "followup";
+        await say(FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general); return;
       }
-
-      if (state.issueText && !state.askedFollowup) {
-        state.askedFollowup = true;
-        state.awaitingFollowupResponse = true;
-        state.currentStep = "followup";
-        const followup = FOLLOWUP_BY_CATEGORY[state.issueCategory] || FOLLOWUP_BY_CATEGORY.general;
-        await say(followup);
-        return;
-      }
-
-      if (!state.carMakeModel) {
-        state.currentStep = "car";
-        await say("What's the make and model of your car?");
-        return;
-      }
-
-      if (!state.name) {
-        state.currentStep = "name";
-        await say("And what's your first name?");
-        return;
-      }
-
-      if (!state.zip) {
-        state.currentStep = "zip";
-        await say("What's your 5-digit ZIP code?");
-        return;
-      }
-
-      if (!state.phone) {
-        state.currentStep = "phone";
-        await say("What's your 10-digit phone number? Say the digits slowly, three at a time.");
-        return;
-      }
-
-      // Only ask urgency if this is a scheduled call (emergency already set it to "Today")
-      if (!state.urgency_window) {
-        state.currentStep = "urgency";
-        await say("When do you need the repair done — today, within a few days, or next week?");
-        return;
-      }
-
-      // NEW: Quote preference (mirrors form toggle)
-      if (!state.quotePreference) {
-        state.currentStep = "quote_preference";
-        await say("Would you prefer we connect you with the first available mechanic as fast as possible, or would you like quotes from two or three mechanics to compare prices?");
-        return;
-      }
-
-      if (!state.drivable) {
-        state.currentStep = "drivable";
-        await say("Can you drive the car to a shop, or does it need to be towed?");
-        return;
-      }
-
-      // NEW: Pickup address when not drivable (mirrors form behavior)
+      if (!state.carMakeModel) { state.currentStep = "car"; await say("What's the make and model of your car?"); return; }
+      if (!state.name) { state.currentStep = "name"; await say("And what's your first name?"); return; }
+      if (!state.zip) { state.currentStep = "zip"; await say("What's your 5-digit ZIP code?"); return; }
+      if (!state.phone) { state.currentStep = "phone"; await say("What's your 10-digit phone number? Say the digits slowly, three at a time."); return; }
+      if (!state.urgency_window) { state.currentStep = "urgency"; await say("When do you need the repair done — today, within a few days, or next week?"); return; }
+      if (!state.quotePreference) { state.currentStep = "quote_preference"; await say("Would you prefer the first available mechanic fast, or quotes from two or three mechanics to compare?"); return; }
+      if (!state.drivable) { state.currentStep = "drivable"; await say("Can you drive the car to a shop, or does it need to be towed?"); return; }
       if (/(no|not drivable|can't drive|cant drive|needs tow|need tow|stranded|stuck)/i.test(state.drivable) && !state.pickupAddress) {
-        state.currentStep = "pickup_address";
-        await say("Since the car can't be driven, what's the street address or cross streets where it's located right now?");
-        return;
+        state.currentStep = "pickup_address"; await say("Since the car can't be driven, what's the street address or cross streets where it's located?"); return;
       }
+      if (!state.contactMethod) { state.currentStep = "contact_method"; await say("Last thing — should the mechanic contact you by phone call, text, or email?"); return; }
 
-      // NEW: Contact method preference
-      if (!state.contactMethod) {
-        state.currentStep = "contact_method";
-        await say("Last thing — would you prefer the mechanic contact you by phone call, text, or email?");
-        return;
-      }
-
-      // ── Ready to confirm ──
       if (readyToConfirm() && !state.confirmed && !state.awaitingConfirmation) {
-        state.awaitingConfirmation = true;
-        state.currentStep = "confirm";
+        state.awaitingConfirmation = true; state.currentStep = "confirm";
         const zipSpoken = speakZipDigits(state.zip);
         const phoneSpoken = speakPhoneDigits(state.phone);
         const carSpoken = `${state.carYear ? state.carYear + " " : ""}${state.carMakeModel}`.trim();
         const pickupNote = state.pickupAddress ? ` The car is at ${state.pickupAddress}.` : "";
-        await say(
-          `To confirm: you're ${state.name} in ZIP ${zipSpoken}, phone ${phoneSpoken}, the car is a ${carSpoken}, and the issue is "${state.issueText}".${pickupNote} Is that right?`
-        );
+        await say(`To confirm: you're ${state.name} in ZIP ${zipSpoken}, phone ${phoneSpoken}, the car is a ${carSpoken}, and the issue is "${state.issueText}".${pickupNote} Is that right?`);
         return;
       }
 
-      // ── Claude fallback for anything unhandled ──
+      // Claude fallback
       messages.push({ role: "user", content: text });
-
       const aiText = await callClaude({
-        model: "claude-haiku-4-5-20251001",
         maxTokens: 90,
-        system:
-          `You are a voice assistant for MassMechanic collecting car repair lead info over the phone. Keep responses under 20 words. Be conversational and friendly. ` +
-          `Current state — name: "${state.name}", zip: "${state.zip}", phone: "${state.phone}", car: "${state.carYear} ${state.carMakeModel}", ` +
-          `issue: "${state.issueText}", urgency: "${state.urgency_window}", drivable: "${state.drivable}", ` +
-          `quotePreference: "${state.quotePreference}", contactMethod: "${state.contactMethod}". ` +
-          `Ask ONE short question to collect the next missing piece of information. Do not ask for last name.`,
+        system: `You are a voice assistant for MassMechanic collecting car repair info by phone. Keep responses under 20 words. Be friendly and conversational. State: name="${state.name}", zip="${state.zip}", phone="${state.phone}", car="${state.carYear} ${state.carMakeModel}", issue="${state.issueText}", urgency="${state.urgency_window}", drivable="${state.drivable}", quotePreference="${state.quotePreference}", contactMethod="${state.contactMethod}". Ask ONE short question to collect the next missing field. Never ask for last name.`,
         messages,
-      }).catch((err) => {
-        console.error("❌ Claude fallback error:", err);
-        return "";
-      });
+      }).catch((err) => { console.error("❌ Claude fallback error:", err); return ""; });
 
-      if (!aiText) {
-        await say("I'm having a quick technical issue. Please text us your ZIP and what's going on, and we'll follow up right away.");
-        return;
-      }
-
+      if (!aiText) { await say("I'm having a quick technical issue. Please text us your ZIP and what's going on, and we'll follow up right away."); return; }
       messages.push({ role: "assistant", content: aiText });
       await say(aiText);
 
     } catch (e) {
       console.error("❌ Processing Error:", e);
-      try { await say("Sorry — I had a quick technical glitch. Please text us your ZIP and car issue, and we'll follow up right away."); } catch {}
+      try { await say("Sorry — I had a quick technical glitch. Please text us your ZIP and car issue, and we'll follow up."); } catch {}
     } finally {
       processing = false;
       if (pendingFinal && !transferred) {
-        setTimeout(() => {
-          if (!processing && !(isSpeaking && Date.now() < speakUntilTs)) drainPendingFinal();
-        }, 400);
+        setTimeout(() => { if (!processing && !(isSpeaking && Date.now() < speakUntilTs)) drainPendingFinal(); }, 400);
       }
     }
   }
@@ -1180,9 +933,7 @@ wss.on("connection", (ws) => {
     if (data.event === "start") {
       streamSid = data.start.streamSid;
       const params = data.start?.customParameters || {};
-      const pFrom = normalizePhone(params.from || "");
-      const pCaller = normalizePhone(params.caller || "");
-      callerPhone = pFrom || pCaller || "unknown";
+      callerPhone = normalizePhone(params.from || "") || normalizePhone(params.caller || "") || "unknown";
       callSid = params.callSid || data.start.callSid || callSid;
       console.log("☎️ Stream start", { streamSid, callSid, callerPhone });
       await upsertCallOutcome({ callSid, patch: { caller_phone: callerPhone, source: "voice", outcome: "in_progress", confirmed: false, notes: null } });
@@ -1190,13 +941,16 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    if (data.event === "media" && deepgramLive?.readyState === WebSocket.OPEN) {
-      deepgramLive.send(Buffer.from(data.media.payload, "base64"));
+    if (data.event === "media") {
+      // Only forward audio to Deepgram when it's open and bot is not speaking
+      if (deepgramLive?.readyState === WebSocket.OPEN && !isSpeaking) {
+        deepgramLive.send(Buffer.from(data.media.payload, "base64"));
+      }
       return;
     }
 
     if (data.event === "stop") {
-      await upsertCallOutcome({ callSid, patch: { caller_phone: state.phone || callerPhone, name: state.name || null, zip_code: state.zip || null, issue_text: state.issueText || null, issue_category: state.issueCategory || null, confirmed: !!state.confirmed, outcome: state.confirmed ? "completed" : transferred ? "transferred" : "ended_unconfirmed", notes: state.confirmed ? "Call completed after confirmation" : "Call ended before confirmation", source: "voice" } });
+      await upsertCallOutcome({ callSid, patch: { caller_phone: state.phone || callerPhone, name: state.name || null, zip_code: state.zip || null, issue_text: state.issueText || null, issue_category: state.issueCategory || null, confirmed: !!state.confirmed, outcome: state.confirmed ? "completed" : transferred ? "transferred" : "ended_unconfirmed", notes: state.confirmed ? "Call completed" : "Call ended before confirmation", source: "voice" } });
       clearDeepgramKeepalive();
       try { if (deepgramLive) deepgramLive.close(); } catch {}
       return;
