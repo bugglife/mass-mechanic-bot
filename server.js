@@ -698,11 +698,16 @@ wss.on("connection", (ws) => {
     });
 
     deepgramLive.on("message", async (msg) => {
-      try {
-        const data = JSON.parse(msg);
-        const transcript = data?.channel?.alternatives?.[0]?.transcript?.trim();
-        const speechFinal = !!data?.speech_final;
-        if (!transcript) return;
+  try {
+    const data = JSON.parse(msg);
+    const transcript = data?.channel?.alternatives?.[0]?.transcript?.trim();
+    const speechFinal = !!data?.speech_final;
+
+    // ADD THIS — log everything coming back from Deepgram
+    if (transcript) console.log(`📝 Transcript (final:${speechFinal}): "${transcript}"`);
+
+    if (!transcript) return;
+    // ... rest of handler
 
         const silentTooLong = Date.now() - lastBotQuestionAt > 30000;
         if (silentTooLong && !transferred && !state.confirmed) {
